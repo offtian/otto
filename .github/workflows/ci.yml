@@ -5,6 +5,7 @@ on:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch: # manual trigger for the LLM-judged eval job (D5)
 
 jobs:
   ci:
@@ -27,3 +28,28 @@ jobs:
 
       - name: Test
         run: uv run pytest tests/ -v
+
+  # LLM-judged golden evals (NFR3). The deterministic record/replay tests run
+  # in the `ci` job above and gate every PR; this job is on-demand only (D5) —
+  # it calls a real model, so it needs LLM_API_KEY set as a repo secret (e.g.
+  # an OpenAI key) and is triggered manually via "Run workflow". Run it locally
+  # against Ollama instead with `just eval`.
+  eval:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_MODEL: ${{ vars.EVAL_LLM_MODEL || 'gpt-5.1' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked
+
+      - name: Eval
+        run: uv run pytest tests/evals/ -vv
+        env:
+          RUN_EVALS: "1"

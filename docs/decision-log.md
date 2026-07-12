@@ -7,6 +7,12 @@ this log preserves *how we got there*.
 
 ---
 
+## 2026-07-12 — Eval-gate location (D5 closed)
+
+| ID | Decision | Status | Notes |
+|---|---|---|---|
+| D5 | **Two-tier eval gating.** The always-on required check is **deterministic record/replay (scripted-model) tests** of the agent loop — tool selection, HITL pause/resume — in the normal pytest job (no network, $0, gates orchestration regressions). The **LLM-judged golden evals** (NFR3's ≥90%-at-n≥20) run **on demand**: locally via `just eval` (against Ollama or a key) and as a `workflow_dispatch` CI job that reads an `LLM_API_KEY` repo secret — **not** a per-PR required check. | Closed | Chosen over the plan's per-PR OpenAI-key gate because the prototype now runs local Ollama (CI can't reach it) and D7 makes quality targets directional. Upgrade path if cloud gating is wanted later: flip the `eval` job to run on `pull_request` with path filters + concurrency caps. Deterministic tests carry orchestration regressions regardless. |
+
 ## 2026-07-12 — Interface restructure: app + routers + Pydantic schemas
 
 | ID | Decision | Status | Notes |
