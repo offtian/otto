@@ -109,7 +109,7 @@ Checkpoint: 50 access requests (staged against the mock in prototype) with **zer
 
 - [ ] **2.1** `ApprovalRecord` schema + retention policy — 🟡 schema + first migration landed (offline-verified DDL) and `resolve(+resolver_id)`/`resolved_at` audit fields wired; ⏳ confirm the `run_state_json` retention window (defaulted to 30d)
 - [ ] **2.2** `PostgresApprovalStore` — 🟡 foundation done (protocol/entity/InMemory + origin round-trip); store + config swap + integration suite **deferred until Docker/Postgres is up** (needs `just infra`)
-- [ ] **2.3** Roles → Postgres table (+ fold in the D15 identity directory) — ⬜ not started
+- [ ] **2.3** Roles → Postgres table (+ fold in the D15 identity directory) — 🟡 schema + migration landed (offline-verified `users` table: D15 identity + D3 role); config wiring (DB directory + fail-closed role lookup, settings fallback) + integration **deferred until Docker**
 - [ ] **2.4** SailPoint MCP — mock now, real at graduation — ⏳ your call + 🔒 T8 mock surface
 - [ ] **2.5** Expiry, reminders, retention sweep — ⬜ not started
 - [ ] **2.6** Per-tool sensitivity policy incl. ticket transitions (D10) — ⏳ your call
