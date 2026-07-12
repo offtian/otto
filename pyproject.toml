@@ -163,6 +163,8 @@ ignore = [
     "ANN",     # test signatures don't need annotations
     "D",       # GWT comments carry the intent, not docstrings
     "S101",    # pytest asserts (asserts stay banned in src/ — raise real exceptions)
+    "S105",    # hardcoded test credentials are the point of test fixtures
+    "S106",    # hardcoded test credentials passed as arguments, same reasoning
     "SLF001",  # tests may reach into privates
     "INP001",  # test dirs are not packages
     "FBT",     # boolean literals in test data/parametrize are fine
