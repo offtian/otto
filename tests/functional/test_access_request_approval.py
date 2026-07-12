@@ -330,4 +330,3 @@ class TestAccessRequestApprovalFromTicket:
         first_input = json.dumps(model.inputs[0], default=str)
         assert "Conversation so far" in first_input
         assert "Did you restart the client?" in first_input
-
