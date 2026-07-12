@@ -15,8 +15,8 @@ Layer rules (enforced by import-linter):
 import functools
 import pathlib
 
-import attrs
 import httpx
+import pydantic
 from agents import mcp as agents_mcp
 from agents.models import interface as model_interface
 from slack_sdk.web.async_client import AsyncWebClient
@@ -29,26 +29,36 @@ from otto.vendors import llm, mcp
 from otto.vendors import slack as slack_vendor
 
 
-@attrs.frozen
-class Configuration:
+class Configuration(pydantic.BaseModel):
     """
     Process-wide wiring of settings and adapters.
+
+    A Pydantic model for consistency with ``settings`` and the interface
+    schemas, but every field except ``settings`` holds a live adapter (an SDK
+    client, MCP server, or model) — or, in tests, a double — that Pydantic
+    cannot isinstance-validate, so those use ``SkipValidation``. ``frozen``
+    keeps the wiring immutable; ``protected_namespaces=()`` allows the
+    ``model`` field name.
     """
 
+    model_config = pydantic.ConfigDict(
+        frozen=True, protected_namespaces=(), arbitrary_types_allowed=True
+    )
+
     settings: Settings
-    slack: slack_vendor.SlackGateway
-    triage: slack_vendor.SlackTriageBackend
+    slack: pydantic.SkipValidation[slack_vendor.SlackGateway]
+    triage: pydantic.SkipValidation[slack_vendor.SlackTriageBackend]
     # None = ticket channel disabled (no jira_base_url configured).
-    jira: jira_vendor.JiraGateway | None
+    jira: pydantic.SkipValidation[jira_vendor.JiraGateway | None]
     # Cross-channel requester identity + team; empty when users_file is
     # absent — lookups just return None.
-    directory: identity_users.UserDirectory
-    approvals: approvals.ApprovalStore
-    model: model_interface.Model
+    directory: pydantic.SkipValidation[identity_users.UserDirectory]
+    approvals: pydantic.SkipValidation[approvals.ApprovalStore]
+    model: pydantic.SkipValidation[model_interface.Model]
     # MCP servers are optional: None = capability runs on its local stub
     # tool, so the full loop works in dev with zero external dependencies.
-    confluence_mcp: agents_mcp.MCPServerStreamableHttp | None
-    sailpoint_mcp: agents_mcp.MCPServerStreamableHttp | None
+    confluence_mcp: pydantic.SkipValidation[agents_mcp.MCPServerStreamableHttp | None]
+    sailpoint_mcp: pydantic.SkipValidation[agents_mcp.MCPServerStreamableHttp | None]
 
 
 @functools.cache
