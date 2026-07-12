@@ -7,6 +7,14 @@ this log preserves *how we got there*.
 
 ---
 
+## 2026-07-12 — Interface restructure: app + routers + Pydantic schemas
+
+| ID | Decision | Status | Notes |
+|---|---|---|---|
+| D16 | **Split `interfaces/api.py` into `app.py` (assembly: lifespan, dedup state, `include_router`) + `routers/{slack,jira,health}.py` (one sub-router per channel/concern).** Routes stay thin: verify transport (signature/secret) + dedup, then schedule a background use-case. | Applied | Requested for readability as the interface grew. `main.py` + `just run` target `otto.interfaces.app:app`. |
+| D17 | **Pydantic schemas validate every inbound payload at the boundary** (`interfaces/schemas.py`: Slack events, Slack interactions, Jira webhooks). Schemas model only used fields (`extra="ignore"`, all-optional, lenient `parse` → None on malformed), and carry the mapping to channel-neutral domain shapes (`.to_support_request()`, `.resolution_key()`, `.to_*()`). | Applied | Keeps the D-rule boundary: **application never sees transport JSON** — only mapped domain objects. `pydantic` added as a direct dep. camelCase wire fields (`accountId`, etc.) get an N815 per-file-ignore. |
+| D18 | **Background dispatch + its input DTOs live in `application/dispatch.py`**, not the interface. The FR8 "run-safely, apologize-at-origin" wrappers are use-case orchestration, so they belong below the interface; the interface parses payloads into these inputs and schedules them. | Applied | `interfaces` → `application` only (import-linter clean). The interaction DTOs (`ApprovalDecision`/`FeedbackVote`/`ResolveClick`) are use-case inputs, so they moved down with the wrappers; schemas map into them. |
+
 ## 2026-07-12 — Resolution signals: native D6 + Slack Q&A (T2 closed)
 
 Wiring D6's resolution metric (plan step 1.3). The decision-free signals

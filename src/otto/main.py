@@ -15,7 +15,7 @@ def main() -> None:
     app_config = config.get_config()
     logs.configure_logging(level=app_config.settings.log_level)
     uvicorn.run(
-        "otto.interfaces.api:app",
+        "otto.interfaces.app:app",
         host="0.0.0.0",
         port=8000,
         log_level=app_config.settings.log_level.lower(),

@@ -18,6 +18,7 @@ requires-python = ">=3.13"
 
 dependencies = [
     "attrs",
+    "pydantic>=2.7",
     "pydantic-settings>=2.7",
     "structlog>=24.0",
     # Data layer: databases lib for runtime queries, SQLModel metadata +
@@ -160,6 +161,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["F401"]  # re-exports
+# Payload schemas mirror external Slack/Jira JSON — field names must match the
+# wire (camelCase), so class-var naming rules don't apply.
+"src/otto/interfaces/schemas.py" = ["N815"]
 "tests/**" = [
     "ANN",     # test signatures don't need annotations
     "D",       # GWT comments carry the intent, not docstrings

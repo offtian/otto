@@ -11,7 +11,7 @@ from otto import config
 from otto.application import support
 from otto.domain.identity import users
 from otto.domain.support import approvals, entities
-from otto.interfaces import api
+from otto.interfaces import app as otto_app
 from otto.settings import Settings
 from otto.utils import logs
 
@@ -63,9 +63,9 @@ def client(monkeypatch):
         sailpoint_mcp=None,
     )
     monkeypatch.setattr(config, "get_config", lambda: cfg)
-    api.app.state.recent_events = api._RecentIds()
-    api.app.state.jira_bot_account_id = None
-    return testclient.TestClient(api.app), cfg
+    otto_app.app.state.recent_events = otto_app._RecentIds()
+    otto_app.app.state.jira_bot_account_id = None
+    return testclient.TestClient(otto_app.app), cfg
 
 
 class TestSlackEvents:
