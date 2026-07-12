@@ -109,7 +109,7 @@ Checkpoint: 50 access requests (staged against the mock in prototype) with **zer
 
 - [ ] **2.1** `ApprovalRecord` schema + retention policy — 🟡 schema + migration + audit fields (`resolve(+resolver_id)`/`resolved_at`) **done & verified against live Postgres** (up/down cycle clean); ⏳ confirm the `run_state_json` retention window (defaulted to 30d)
 - [x] **2.2** `PostgresApprovalStore` — **done & verified**: conditional-UPDATE store, config swap (Postgres when `DATABASE_URL` set), lifespan connect; 7 integration tests incl. concurrent-resolve; drain runbook (`docs/drain-approvals.md`)
-- [ ] **2.3** Roles → Postgres table (+ fold in the D15 identity directory) — 🟡 schema + migration landed (offline-verified `users` table: D15 identity + D3 role); config wiring (DB directory + fail-closed role lookup, settings fallback) + integration **deferred until Docker**
+- [x] **2.3** Roles → Postgres table (+ fold in the D15 identity directory) — **done & verified**: `PostgresUserDirectory` (live, fail-closed) swapped in by config; role check = DB role → settings bootstrap fallback; 3 integration tests incl. live role-revocation
 - [ ] **2.4** SailPoint MCP — mock now, real at graduation — ⏳ your call + 🔒 T8 mock surface
 - [ ] **2.5** Expiry, reminders, retention sweep — ⬜ not started
 - [ ] **2.6** Per-tool sensitivity policy incl. ticket transitions (D10) — ⏳ your call
