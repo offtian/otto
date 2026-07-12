@@ -49,9 +49,25 @@ Marked `[TBC: Tn]` where they appear in the plan. **Open decisions (yours):**
 
 ## Phased plan
 
+**Status legend:** `[x]` done · `[ ]` 🟡 partial · `[ ]` ⬜ not started · `[ ]` ⏳ needs your decision · `[ ]` 🔒 blocked on an external account/service. The checklist under each phase is the at-a-glance tracker; the table below it holds the full detail (gate, goal, I/O, risks, acceptance criteria) for each step.
+
+**Overall:** Phase 0 — **8/11 done**; 0.8 partial (telemetry test), 0.1 + 0.11 blocked on external accounts. Phase 1 — 1.3 partial (3 of 4 D6 signals), the rest gated on decisions/accounts. Phases 2–3 — not started.
+
 ### Phase 0: Walking skeleton — full loop end-to-end on both channels with zero external dependencies
 
 Checkpoint: a Slack DM to @otto gets a stubbed answer; a Jira ticket gets a stubbed comment answer; an access request from either channel pauses, posts an approval card, and resumes on a **role-checked** click with the outcome delivered at the origin.
+
+- [ ] **0.1** Dev accounts: Slack app + Jira Cloud — 🔒 blocked: T7 (Slack workspace) + T9 (Jira Cloud)
+- [x] **0.2** Pin SDK, extend settings, wire composition root
+- [x] **0.3** Channel-neutral domain shapes (D8)
+- [x] **0.4** FastAPI interface layer + failure path (FR8)
+- [x] **0.5** Otto agent + tools + conversation reconstruction (D2)
+- [x] **0.6** Confluence read-only enforcement (A1)
+- [x] **0.7** HITL loop with role-gated approvals (D3/FR7) — T3 "prohibit self-approval" applied
+- [ ] **0.8** Telemetry verification — 🟡 wiring landed in 0.4; NFR2 log-content test + manual Jaeger span check still outstanding
+- [x] **0.9** Eval harness + `just eval` recipe — scoped to 3 pytest golden cases (D12); YAML runner + LLM judge deferred to n≈20
+- [x] **0.10** Runbooks (×3), `.env.example`, parity test
+- [ ] **0.11** Phase 0 exit demo — both channels — 🔒 blocked: T7 + T9 (needs live Slack + Jira)
 
 | # | Step | Gate | Goal | I/O | Risks | Acceptance criteria |
 |---|---|---|---|---|---|---|
@@ -71,6 +87,13 @@ Checkpoint: a Slack DM to @otto gets a stubbed answer; a Jira ticket gets a stub
 
 Checkpoint: real Confluence answers with citations on both channels; resolution metric (per D6) live; eval gate enforced per the D5 decision. Targets are directional at prototype scale (D7).
 
+- [ ] **1.1** Decide the eval-gate location (D5) — ⏳ your call
+- [ ] **1.2** Implement the gate + record/replay tests — ⬜ not started (CI gate after 1.1; cassette tests doable now)
+- [ ] **1.3** Resolution signals (D6 + D6-gap) — 🟡 done: `ticket_status`, `access_granted`, `helpful_vote` (T2 closed → "Did this help?" vote); missing: the support-agent-marks-resolved signal
+- [ ] **1.4** Connect real Confluence + citations + injection hardening — 🔒 blocked: T6
+- [ ] **1.5** Runbook content → 10 flows — ⬜ not started (3/10; T4 default = synthesized IT flows)
+- [ ] **1.6** Prototype pilot + Phase 1 exit review — ⏳ your call + real usage
+
 | # | Step | Gate | Goal | I/O | Risks | Acceptance criteria |
 |---|---|---|---|---|---|---|
 | 1.1 | Decide the eval-gate location (D5) | `[NEEDS APPROVAL]` — **question:** adopt the recommended default (path-filtered GitHub Actions eval job with `OPENAI_API_KEY` secret + `workflow_dispatch`, required check; record/replay tests in the normal pytest job) or an alternative (committed fingerprinted report verified hermetically; scheduled non-blocking)? `[TBC: T1]` | Resolve D5 before building gate machinery | **In:** D5 options in `docs/decision-log.md`. **Out:** decision logged; D5 closed | Per-PR gating without path filters/concurrency caps → surprise API spend | Decision recorded in the decision log and PRD §4 |
@@ -83,6 +106,14 @@ Checkpoint: real Confluence answers with citations on both channels; resolution 
 ### Phase 2: Access automation + durable HITL — the approval flow earns its keep
 
 Checkpoint: 50 access requests (staged against the mock in prototype) with **zero** unapproved writes; audit report generated from the store.
+
+- [ ] **2.1** `ApprovalRecord` schema + retention policy — ⏳ your call (audit fields + `run_state_json` retention)
+- [ ] **2.2** `PostgresApprovalStore` — ⬜ not started (after 2.1)
+- [ ] **2.3** Roles → Postgres table (+ fold in the D15 identity directory) — ⬜ not started
+- [ ] **2.4** SailPoint MCP — mock now, real at graduation — ⏳ your call + 🔒 T8 mock surface
+- [ ] **2.5** Expiry, reminders, retention sweep — ⬜ not started
+- [ ] **2.6** Per-tool sensitivity policy incl. ticket transitions (D10) — ⏳ your call
+- [ ] **2.7** Audit report + Phase 2 exit — ⏳ your call
 
 | # | Step | Gate | Goal | I/O | Risks | Acceptance criteria |
 |---|---|---|---|---|---|---|
@@ -97,6 +128,13 @@ Checkpoint: 50 access requests (staged against the mock in prototype) with **zer
 ### Phase 3: ServiceNow, specialists & scale — Otto becomes the default first responder
 
 Graduation-heavy: most steps assume a firm deployment. Re-plan at the Phase 2 exit; steps are intentionally coarser.
+
+- [ ] **3.1** ServiceNow at graduation `[GRADUATION]` — ⏳ your call
+- [ ] **3.2** ServiceNow adapter behind the channel seam — ⬜ not started (after 3.1)
+- [ ] **3.3** Persistent session memory (replaces D2 reconstruction) — ⏳ your call
+- [ ] **3.4** Specialist agents via handoffs — ⬜ not started (eval-evidence-triggered)
+- [ ] **3.5** Streaming, rate limiting, Redis dedup — ⬜ not started (multi-replica)
+- [ ] **3.6** Enterprise Grid rollout `[GRADUATION]` — ⏳ your call
 
 | # | Step | Gate | Goal | I/O | Risks | Acceptance criteria |
 |---|---|---|---|---|---|---|
