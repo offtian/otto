@@ -6,6 +6,7 @@ loop, RunState serialization (NFR6), store, and use-cases are all real.
 """
 
 import json
+from unittest import mock
 
 import pytest
 from agents.items import ModelResponse
@@ -81,12 +82,17 @@ class ScriptedModel(Model):
 class FakeSlackGateway:
     def __init__(self):
         self.messages = []  # (channel, thread_ts, text)
+        self.answers = []  # (channel, thread_ts, text, feedback_value)
         self.cards = []
         self.updates = []
 
     async def post_message(self, *, channel, text, thread_ts=None):
         self.messages.append((channel, thread_ts, text))
         return "100.1"
+
+    async def post_answer(self, *, channel, text, thread_ts, feedback_value):
+        self.answers.append((channel, thread_ts, text, feedback_value))
+        return "100.2"
 
     async def update_message(self, *, channel, ts, text):
         self.updates.append((channel, ts, text))
@@ -209,6 +215,27 @@ class TestAccessRequestApproval:
         assert ("D1", "1.0", "Your request was submitted for provisioning.") in gateway.messages
         assert "U_SUPPORT" in gateway.updates[-1][2]
         assert (await cfg.approvals.get(approval_id)).status is approvals.ApprovalStatus.APPROVED
+
+    async def test_approval_records_an_access_resolution_signal(self, wire, monkeypatch):
+        # Given a paused access request and a resolution-log spy (D6: SailPoint submission)
+        model = ScriptedModel([[_access_tool_call()], [_text("Submitted for provisioning.")]])
+        _cfg, gateway, _ = wire(model)
+        await _submit_request()
+        approval_id = gateway.cards[0]["approval_id"]
+        events = mock.Mock(wraps=support.logs.log_event)
+        monkeypatch.setattr(support.logs, "log_event", events)
+
+        # When an authorized approver approves it
+        await support.resolve_approval(
+            approval_id=approval_id, resolver_id="U_SUPPORT", approved=True
+        )
+
+        # Then the granted access is recorded as a resolution signal
+        assert any(
+            call.args[0] == "request_resolved"
+            and call.kwargs["params"]["signal"] == "access_granted"
+            for call in events.call_args_list
+        )
 
     async def test_denial_never_executes_the_tool(self, wire):
         # Given a paused access request
@@ -339,6 +366,63 @@ class TestAccessRequestApprovalFromTicket:
         first_input = json.dumps(model.inputs[0], default=str)
         assert "Conversation so far" in first_input
         assert "Did you restart the client?" in first_input
+
+
+class TestKnowledgeAnswerFeedback:
+    async def test_a_slack_answer_carries_a_resolution_vote(self, wire):
+        # Given a model that returns a plain knowledge answer
+        _cfg, gateway, _ = wire(ScriptedModel([[_text("Restart the VPN client.")]]))
+
+        # When a Slack request is answered
+        await _submit_request()
+
+        # Then the answer posts with a "did this help?" vote, threaded at the origin
+        channel, thread_ts, text, feedback_value = gateway.answers[0]
+        assert (channel, thread_ts, text) == ("D1", "1.0", "Restart the VPN client.")
+        assert feedback_value == "D1:1.0"
+
+    async def test_a_ticket_answer_has_no_vote(self, wire):
+        # Given a Jira-origin request answered with plain text
+        jira = FakeJiraGateway()
+        _cfg, gateway, _ = wire(ScriptedModel([[_text("Restart the VPN client.")]]), jira=jira)
+
+        # When it is answered
+        await _submit_request(origin=TICKET_ORIGIN)
+
+        # Then the answer is a plain ticket comment — Jira has a native resolved signal
+        assert gateway.answers == []
+        assert ("IT-7", "Restart the VPN client.") in jira.comments
+
+    async def test_a_yes_vote_records_a_resolution(self, wire, monkeypatch):
+        # Given a wired config and a resolution-log spy
+        _cfg, gateway, _ = wire(ScriptedModel([]))
+        events = mock.Mock(wraps=support.logs.log_event)
+        monkeypatch.setattr(support.logs, "log_event", events)
+
+        # When the requester votes that the answer helped
+        await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
+
+        # Then a resolution signal is recorded and the requester is thanked at the origin
+        assert any(
+            call.args[0] == "request_resolved"
+            and call.kwargs["params"]["signal"] == "helpful_vote"
+            for call in events.call_args_list
+        )
+        assert any(channel == "D1" and "helped" in text for channel, _, text in gateway.messages)
+
+    async def test_a_no_vote_escalates_to_a_human(self, wire):
+        # Given a wired config with a Slack triage backend
+        _cfg, gateway, _ = wire(ScriptedModel([]))
+
+        # When the requester votes that the answer did not help
+        await support.record_feedback(helpful=False, origin=ORIGIN, voter_id="U_REQ")
+
+        # Then it is escalated to the triage channel — the path forward on a miss
+        assert any(
+            channel == "C_TRIAGE" and "Escalation" in text for channel, _, text in gateway.messages
+        )
+        # Then the requester is told a human will follow up, at their origin
+        assert any(channel == "D1" and "human" in text for channel, _, text in gateway.messages)
 
 
 SAM = users.User(

@@ -55,6 +55,14 @@ class _ApprovalDecision:
     approved: bool
 
 
+@attrs.frozen
+class _FeedbackClick:
+    helpful: bool
+    channel: str
+    thread_ts: str
+    voter_id: str
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
     cfg = config.get_config()
@@ -116,10 +124,15 @@ async def slack_interactions(
     )
     form = urllib.parse.parse_qs(body.decode("utf-8"))
     payload = json.loads(form.get("payload", ["{}"])[0])
-    decision = _to_approval_decision(payload)
-    if decision is None or not cfg.settings.otto_enabled:
+    if not cfg.settings.otto_enabled:
         return fastapi.Response()
-    background.add_task(_resolve_safely, decision)
+    decision = _to_approval_decision(payload)
+    if decision is not None:
+        background.add_task(_resolve_safely, decision)
+        return fastapi.Response()
+    feedback = _to_feedback_click(payload)
+    if feedback is not None:
+        background.add_task(_record_feedback_safely, feedback)
     return fastapi.Response()
 
 
@@ -138,7 +151,20 @@ async def jira_webhook(
         url_token=request.query_params.get("secret", ""),
     ):
         raise fastapi.HTTPException(status_code=401, detail="invalid Jira webhook secret")
-    support_request = _to_ticket_request(json.loads(body))
+    payload = json.loads(body)
+    resolved_key = _resolution_from_update(payload)
+    if resolved_key is not None:
+        # Native D6 resolution signal — pure telemetry, so deliberately not
+        # gated by the kill switch (the ticket resolved regardless of Otto).
+        changelog = payload.get("changelog")
+        dedup_id = changelog.get("id") if isinstance(changelog, dict) else None
+        if not request.app.state.recent_events.seen(f"jira:resolved:{dedup_id}"):
+            logs.log_event(
+                "request_resolved",
+                params={"signal": "ticket_status", "issue_key": resolved_key},
+            )
+        return fastapi.Response()
+    support_request = _to_ticket_request(payload)
     if support_request is None or not cfg.settings.otto_enabled:
         return fastapi.Response()
     if request.app.state.recent_events.seen(support_request.id):
@@ -230,6 +256,34 @@ def _to_ticket_request(payload: dict[str, object]) -> entities.SupportRequest | 
     return None
 
 
+def _resolution_from_update(payload: dict[str, object]) -> str | None:
+    """
+    Return the issue key when a Jira ``issue_updated`` event is a transition
+    into a done-category status — a native D6 resolution signal — else None.
+
+    Fires only when this event's changelog actually contains a status change
+    AND the resulting status sits in Jira's fixed ``done`` category, so plain
+    field edits and non-terminal transitions never count as resolutions.
+    """
+    if payload.get("webhookEvent") != "jira:issue_updated":
+        return None
+    changelog = payload.get("changelog")
+    if not isinstance(changelog, dict):
+        return None
+    items = changelog.get("items")
+    if not isinstance(items, list) or not any(
+        isinstance(item, dict) and item.get("field") == "status" for item in items
+    ):
+        return None
+    issue = payload.get("issue")
+    if not isinstance(issue, dict):
+        return None
+    status = (issue.get("fields") or {}).get("status") or {}
+    if (status.get("statusCategory") or {}).get("key") != "done":
+        return None
+    return str(issue.get("key", ""))
+
+
 async def _is_own_jira_actor(
     *,
     app_: fastapi.FastAPI,
@@ -272,6 +326,28 @@ def _to_approval_decision(payload: dict[str, object]) -> _ApprovalDecision | Non
     )
 
 
+def _to_feedback_click(payload: dict[str, object]) -> _FeedbackClick | None:
+    if payload.get("type") != "block_actions":
+        return None
+    actions = payload.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return None
+    action = actions[0]
+    action_id = action.get("action_id")
+    if action_id not in (slack_vendor.FEEDBACK_YES_ACTION_ID, slack_vendor.FEEDBACK_NO_ACTION_ID):
+        return None
+    user = payload.get("user")
+    if not isinstance(user, dict):
+        return None
+    channel, _, thread_ts = str(action.get("value", "")).partition(":")
+    return _FeedbackClick(
+        helpful=action_id == slack_vendor.FEEDBACK_YES_ACTION_ID,
+        channel=channel,
+        thread_ts=thread_ts,
+        voter_id=str(user.get("id", "")),
+    )
+
+
 async def _handle_safely(request: entities.SupportRequest) -> None:
     """
     FR8 wrapper: a crashed handler still yields an origin-visible apology
@@ -296,3 +372,14 @@ async def _resolve_safely(decision: _ApprovalDecision) -> None:
         )
     except Exception as exc:
         logs.log_exception(exc, params={"approval_id": decision.approval_id})
+
+
+async def _record_feedback_safely(click: _FeedbackClick) -> None:
+    try:
+        await support.record_feedback(
+            helpful=click.helpful,
+            origin=entities.SlackThread(channel_id=click.channel, thread_ts=click.thread_ts),
+            voter_id=click.voter_id,
+        )
+    except Exception as exc:
+        logs.log_exception(exc, params={"feedback_channel": click.channel})

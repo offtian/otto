@@ -12,6 +12,8 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 APPROVE_ACTION_ID = "otto_approval_approve"
 DENY_ACTION_ID = "otto_approval_deny"
+FEEDBACK_YES_ACTION_ID = "otto_feedback_yes"
+FEEDBACK_NO_ACTION_ID = "otto_feedback_no"
 
 
 @attrs.frozen
@@ -36,6 +38,46 @@ class SlackGateway:
             channel=channel,
             text=text,
             thread_ts=thread_ts,
+        )
+        return str(response["ts"])
+
+    async def post_answer(
+        self,
+        *,
+        channel: str,
+        text: str,
+        thread_ts: str | None,
+        feedback_value: str,
+    ) -> str:
+        """
+        Post a knowledge answer with a "Did this help?" resolution vote and
+        return its ``ts`` (T2 — the Slack-side D6 signal). ``feedback_value``
+        is echoed back on click to locate the originating thread.
+        """
+        blocks: list[dict[str, object]] = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": "Did this help?"}]},
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Yes, thanks"},
+                        "style": "primary",
+                        "action_id": FEEDBACK_YES_ACTION_ID,
+                        "value": feedback_value,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "No, still stuck"},
+                        "action_id": FEEDBACK_NO_ACTION_ID,
+                        "value": feedback_value,
+                    },
+                ],
+            },
+        ]
+        response = await self.client.chat_postMessage(
+            channel=channel, text=text, thread_ts=thread_ts, blocks=blocks
         )
         return str(response["ts"])
 

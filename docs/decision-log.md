@@ -7,6 +7,16 @@ this log preserves *how we got there*.
 
 ---
 
+## 2026-07-12 — Resolution signals: native D6 + Slack Q&A (T2 closed)
+
+Wiring D6's resolution metric (plan step 1.3). The decision-free signals
+landed first, then T2 for the Slack side.
+
+| ID | Decision | Status | Notes |
+|---|---|---|---|
+| — | **Native D6 signals emit a single `request_resolved` log event** with a `signal` discriminator: `ticket_status` (a Jira `issue_updated` transition into the fixed `done` status category, deduped on changelog id, recorded even under the kill switch since it is pure telemetry) and `access_granted` (the approve path — a SailPoint submission). | Applied | `interfaces/api.py` `_resolution_from_update` + `application/support.py`. No open decision — D6 names both. Ticket-status uses `statusCategory.key == "done"` (workspace-agnostic), not status-name matching. |
+| T2 | **Slack knowledge-Q&A signal = a "Did this help?" Yes/No vote on the answer**, not the ✅ reaction. Delegated to Claude's UX read. **Yes** → `request_resolved{signal: helpful_vote}`; **No** → escalate to the triage channel (`TicketBackend`) + `feedback_negative`, no resolution. | Closed | Chosen over the reaction for discoverability (nobody reacts ✅ to a bot untrained) and a failure path (reaction is positive-only, so a wrong answer left the user stuck and un-measured — the A5 failure). Ceiling (`ponytail:` in `_post_answer`): the vote trails every non-paused Slack answer, so it also rides mid-runbook steps — upgrade is an agent-flagged terminal answer. Vote is not gated to the requester (DMs are single-user; directional at prototype scale, D7). |
+
 ## 2026-07-12 — Ticket channel landed + requester identity
 
 Two follow-ups after the walking skeleton, same day:

@@ -36,7 +36,7 @@ async def handle_support_request(*, request: entities.SupportRequest) -> None:
     if result.interruptions:
         await _pause_for_approval(request=request, result=result, cfg=cfg)
     else:
-        await _post_reply(origin=request.origin, text=str(result.final_output), cfg=cfg)
+        await _post_answer(origin=request.origin, text=str(result.final_output), cfg=cfg)
     logs.log_event(
         "support_request_handled",
         params={"request_id": request.id, "paused": bool(result.interruptions)},
@@ -106,6 +106,12 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
             "status": status.value,
         },
     )
+    if approved:
+        # Native D6 resolution signal — the gated tool ran (SailPoint submission).
+        logs.log_event(
+            "request_resolved",
+            params={"signal": "access_granted", "request_id": pending.request_id},
+        )
 
 
 async def notify_failure(*, request: entities.SupportRequest) -> None:
@@ -122,6 +128,44 @@ async def notify_failure(*, request: entities.SupportRequest) -> None:
             "Sorry — something went wrong on my side while handling this. "
             "The support team has been alerted; please try again in a bit."
         ),
+        cfg=cfg,
+    )
+
+
+async def record_feedback(*, helpful: bool, origin: entities.Origin, voter_id: str) -> None:
+    """
+    Apply a requester's "Did this help?" vote on a Slack answer (T2, the
+    Slack-side D6 signal). A yes records a resolution; a no loops in a human
+    and records nothing as resolved. Either way the voter gets an origin
+    reply confirming the vote landed.
+
+    :param helpful: True for the yes vote, False for the no vote.
+    :param origin: the answered conversation (always a Slack thread today —
+        the vote buttons ride only on Slack answers).
+    :param voter_id: Slack user id of whoever clicked.
+    """
+    cfg = config.get_config()
+    if helpful:
+        logs.log_event(
+            "request_resolved",
+            params={"signal": "helpful_vote", "origin": _origin_ref(origin), "voter_id": voter_id},
+        )
+        await _post_reply(origin=origin, text="Glad that helped! :tada:", cfg=cfg)
+        return
+    await cfg.triage.escalate(
+        subject="Unresolved support answer",
+        summary="The requester reported that my answer did not resolve their issue.",
+        urgency="normal",
+        requester_id=voter_id,
+        origin_ref=_origin_ref(origin),
+    )
+    logs.log_event(
+        "feedback_negative",
+        params={"origin": _origin_ref(origin), "voter_id": voter_id},
+    )
+    await _post_reply(
+        origin=origin,
+        text="Sorry that didn't help — I've flagged this for a human to take a look.",
         cfg=cfg,
     )
 
@@ -315,6 +359,41 @@ def _tool_arguments(interruption: agents.ToolApprovalItem) -> str:
     if isinstance(raw, dict):
         return str(raw.get("arguments", ""))
     return str(getattr(raw, "arguments", ""))
+
+
+async def _post_answer(
+    *,
+    origin: entities.Origin,
+    text: str,
+    cfg: config.Configuration,
+) -> None:
+    """
+    Deliver a knowledge answer at its origin. Slack answers carry a "Did
+    this help?" resolution vote (T2); ticket answers rely on the native
+    status signal (D6), so they post as a plain comment.
+
+    ponytail: the vote rides every non-paused Slack answer, so it also
+    trails intermediate runbook-walkthrough steps — mildly naggy. Upgrade:
+    have the agent flag a terminal answer and vote only on those.
+    """
+    match origin:
+        case entities.SlackThread(channel_id=channel_id, thread_ts=thread_ts):
+            await cfg.slack.post_answer(
+                channel=channel_id,
+                text=text,
+                thread_ts=thread_ts,
+                feedback_value=_feedback_value(origin),
+            )
+        case entities.TicketRef():
+            await _post_reply(origin=origin, text=text, cfg=cfg)
+
+
+def _feedback_value(origin: entities.SlackThread) -> str:
+    """
+    Encode a Slack thread into a button value the interaction handler can
+    split back into its channel and thread ts.
+    """
+    return f"{origin.channel_id}:{origin.thread_ts}"
 
 
 async def _post_reply(

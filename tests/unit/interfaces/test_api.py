@@ -13,6 +13,7 @@ from otto.domain.identity import users
 from otto.domain.support import approvals, entities
 from otto.interfaces import api
 from otto.settings import Settings
+from otto.utils import logs
 
 
 SIGNING_SECRET = "test-signing-secret"
@@ -180,13 +181,22 @@ class TestSlackEvents:
 
 
 class TestSlackInteractions:
-    def _interaction_body(self, action_id: str = "otto_approval_approve") -> bytes:
+    def _interaction_body(
+        self, action_id: str = "otto_approval_approve", value: str = "ap-1"
+    ) -> bytes:
         payload = {
             "type": "block_actions",
             "user": {"id": "U_SUPPORT"},
-            "actions": [{"action_id": action_id, "value": "ap-1"}],
+            "actions": [{"action_id": action_id, "value": value}],
         }
         return urllib.parse.urlencode({"payload": json.dumps(payload)}).encode()
+
+    def _post_interaction(self, http, body: bytes):
+        return http.post(
+            "/slack/interactions",
+            content=body,
+            headers={**_signed_headers(body), "content-type": "application/x-www-form-urlencoded"},
+        )
 
     def test_dispatches_an_approve_click(self, client, monkeypatch):
         # Given a resolver spy
@@ -226,6 +236,41 @@ class TestSlackInteractions:
         assert response.status_code == 200
         assert resolver.await_count == 0
 
+    def test_dispatches_a_helpful_vote(self, client, monkeypatch):
+        # Given a feedback spy
+        http, _ = client
+        recorder = mock.AsyncMock()
+        monkeypatch.setattr(support, "record_feedback", recorder)
+        body = self._interaction_body(action_id="otto_feedback_yes", value="C1:1.0")
+
+        # When a "yes" vote arrives, signed
+        response = self._post_interaction(http, body)
+
+        # Then it reaches the application layer as a Slack-thread origin
+        assert response.status_code == 200
+        recorder.assert_awaited_once_with(
+            helpful=True,
+            origin=entities.SlackThread(channel_id="C1", thread_ts="1.0"),
+            voter_id="U_SUPPORT",
+        )
+
+    def test_dispatches_a_no_vote(self, client, monkeypatch):
+        # Given a feedback spy
+        http, _ = client
+        recorder = mock.AsyncMock()
+        monkeypatch.setattr(support, "record_feedback", recorder)
+        body = self._interaction_body(action_id="otto_feedback_no", value="C1:1.0")
+
+        # When a "no" vote arrives
+        self._post_interaction(http, body)
+
+        # Then the not-helpful vote reaches the application layer
+        recorder.assert_awaited_once_with(
+            helpful=False,
+            origin=entities.SlackThread(channel_id="C1", thread_ts="1.0"),
+            voter_id="U_SUPPORT",
+        )
+
 
 def _jira_issue_payload(issue_id: str = "10001") -> bytes:
     return json.dumps(
@@ -250,6 +295,23 @@ def _jira_comment_payload(comment_id: str = "20001", author: str = "USER_ACCT") 
             "webhookEvent": "comment_created",
             "issue": {"id": "10001", "key": "IT-1"},
             "comment": {"id": comment_id, "author": {"accountId": author}, "body": "any update?"},
+        }
+    ).encode()
+
+
+def _jira_transition_payload(
+    *, category: str = "done", changelog_id: str = "cl-1", status_change: bool = True
+) -> bytes:
+    item = {"field": "status" if status_change else "assignee", "toString": "Done"}
+    return json.dumps(
+        {
+            "webhookEvent": "jira:issue_updated",
+            "changelog": {"id": changelog_id, "items": [item]},
+            "issue": {
+                "id": "10001",
+                "key": "IT-1",
+                "fields": {"status": {"name": "Done", "statusCategory": {"key": category}}},
+            },
         }
     ).encode()
 
@@ -361,6 +423,70 @@ class TestJiraWebhook:
 
         # Then Jira gets its ack but Otto stays silent
         assert response.status_code == 200
+        assert handler.await_count == 0
+
+    def test_records_a_resolution_when_a_ticket_reaches_a_done_status(self, client, monkeypatch):
+        # Given resolution-log and handler spies
+        http, _ = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+        events = mock.Mock()
+        monkeypatch.setattr(logs, "log_event", events)
+
+        # When a ticket transitions into a done-category status
+        response = http.post(JIRA_URL, content=_jira_transition_payload())
+
+        # Then a native resolution signal is recorded and the agent is not re-run
+        assert response.status_code == 200
+        assert handler.await_count == 0
+        assert any(
+            call.args[0] == "request_resolved"
+            and call.kwargs["params"]["signal"] == "ticket_status"
+            for call in events.call_args_list
+        )
+
+    def test_records_a_resolution_only_once(self, client, monkeypatch):
+        # Given a resolution-log spy and the same transition delivered twice
+        http, _ = client
+        events = mock.Mock()
+        monkeypatch.setattr(logs, "log_event", events)
+        body = _jira_transition_payload(changelog_id="cl-dup")
+
+        # When both deliveries arrive (Jira redelivery)
+        http.post(JIRA_URL, content=body)
+        http.post(JIRA_URL, content=body)
+
+        # Then the resolution is counted exactly once
+        resolutions = [c for c in events.call_args_list if c.args[0] == "request_resolved"]
+        assert len(resolutions) == 1
+
+    def test_ignores_a_transition_to_a_non_done_status(self, client, monkeypatch):
+        # Given a resolution-log spy
+        http, _ = client
+        events = mock.Mock()
+        monkeypatch.setattr(logs, "log_event", events)
+
+        # When a ticket moves to an in-progress (non-done) status
+        response = http.post(JIRA_URL, content=_jira_transition_payload(category="indeterminate"))
+
+        # Then no resolution is recorded — only terminal statuses resolve
+        assert response.status_code == 200
+        assert not any(c.args[0] == "request_resolved" for c in events.call_args_list)
+
+    def test_ignores_a_non_status_field_update(self, client, monkeypatch):
+        # Given resolution-log and handler spies
+        http, _ = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+        events = mock.Mock()
+        monkeypatch.setattr(logs, "log_event", events)
+
+        # When an issue is edited without a status change (e.g. reassigned)
+        response = http.post(JIRA_URL, content=_jira_transition_payload(status_change=False))
+
+        # Then it is a no-op: no resolution recorded and no agent run
+        assert response.status_code == 200
+        assert not any(c.args[0] == "request_resolved" for c in events.call_args_list)
         assert handler.await_count == 0
 
 
