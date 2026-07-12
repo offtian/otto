@@ -75,6 +75,10 @@ test-functional *ARGS:
 test-coverage:
     uv run pytest tests/ --cov=otto --cov-report=term-missing --cov-report=html
 
+# Run golden-case evals against the configured LLM (skipped in `just test`)
+eval *ARGS:
+    RUN_EVALS=1 uv run pytest tests/evals/ -vv {{ ARGS }}
+
 # Code Quality
 # ------------
 
