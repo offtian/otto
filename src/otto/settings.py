@@ -27,9 +27,9 @@ class Settings(BaseSettings):
 
     # LLM gateway (any OpenAI-compatible endpoint: LiteLLM, firm proxy, or
     # api.openai.com when base_url is empty).
-    llm_base_url: str = ""
-    llm_api_key: str = ""
-    llm_model: str = "gpt-5.1"
+    llm_base_url: str = "http://localhost:11434/v1"
+    llm_api_key: str = "ollama"
+    llm_model: str = "qwen3.6"
 
     # Slack app credentials + the channel where humans triage escalations
     # and approve sensitive actions.
