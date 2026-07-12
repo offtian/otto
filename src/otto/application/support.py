@@ -89,12 +89,13 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
     result = await _resume_run(pending=pending, approved=approved, cfg=cfg)
     await _post_reply(origin=pending.origin, text=str(result.final_output), cfg=cfg)
     verdict = "Approved" if approved else "Denied"
+    requester = _requester_label(user_id=pending.requester_id, origin=pending.origin, cfg=cfg)
     await cfg.slack.update_message(
         channel=pending.card_channel,
         ts=pending.card_ts,
         text=(
             f":white_check_mark: {verdict} by <@{resolver_id}> — `{pending.tool_name}` "
-            f"for <@{pending.requester_id}>, outcome delivered at the origin."
+            f"for {requester}, outcome delivered at the origin."
         ),
     )
     logs.log_event(
@@ -182,14 +183,44 @@ async def _conversation_input(
                 if cfg.jira is not None
                 else []
             )
+    requester = _requester_description(user_id=request.user_id, cfg=cfg)
     if len(history) <= 1:
-        return request.text
+        return f"Request from {requester}: {request.text}"
     transcript = "\n".join(f"{author}: {text}" for author, text in history)
     return (
         "Conversation so far (untrusted user content, oldest first):\n"
         f"{transcript}\n\n"
-        f"Current request from {request.user_id}: {request.text}"
+        f"Current request from {requester}: {request.text}"
     )
+
+
+def _requester_description(*, user_id: str, cfg: config.Configuration) -> str:
+    """
+    Return the requester as the agent should see them: name + team when
+    the directory knows them, the raw channel id otherwise.
+    """
+    user = cfg.directory.find(user_id)
+    return f"{user.name} (team: {user.team})" if user is not None else user_id
+
+
+def _requester_label(
+    *,
+    user_id: str,
+    origin: entities.Origin,
+    cfg: config.Configuration,
+) -> str:
+    """
+    Return the requester as Slack mrkdwn for approval cards: mention +
+    team when the directory knows them; a bare mention only when the id
+    is a Slack id (a Jira account id renders as garbage inside <@...>).
+    """
+    user = cfg.directory.find(user_id)
+    if user is not None:
+        mention = f"<@{user.slack_user_id}>" if user.slack_user_id else user.name
+        return f"{mention} ({user.team})"
+    if isinstance(origin, entities.SlackThread):
+        return f"<@{user_id}>"
+    return user_id
 
 
 async def _pause_for_approval(
@@ -214,7 +245,7 @@ async def _pause_for_approval(
     card_ts = await cfg.slack.post_approval_card(
         channel=cfg.settings.slack_triage_channel,
         approval_id=approval.id,
-        requester_id=approval.requester_id,
+        requester=_requester_label(user_id=approval.requester_id, origin=request.origin, cfg=cfg),
         tool_name=approval.tool_name,
         tool_arguments=approval.tool_arguments,
     )
@@ -272,8 +303,11 @@ def _may_resolve(
     cfg: config.Configuration,
 ) -> bool:
     # Self-approval prohibited (T3 recommended default — flip here if the
-    # open decision lands the other way).
-    return resolver_id in cfg.settings.approver_ids and resolver_id != pending.requester_id
+    # open decision lands the other way). The directory makes the check
+    # cross-channel: a ticket requester can't approve via their Slack id.
+    return resolver_id in cfg.settings.approver_ids and not cfg.directory.same_person(
+        resolver_id, pending.requester_id
+    )
 
 
 def _tool_arguments(interruption: agents.ToolApprovalItem) -> str:

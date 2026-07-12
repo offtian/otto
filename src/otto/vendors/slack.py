@@ -72,17 +72,18 @@ class SlackGateway:
         *,
         channel: str,
         approval_id: str,
-        requester_id: str,
+        requester: str,
         tool_name: str,
         tool_arguments: str,
     ) -> str:
         """
         Post a Block Kit approve/deny card for a paused agent run and
-        return its ``ts``.
+        return its ``ts``. ``requester`` is pre-rendered mrkdwn (mention
+        and/or name + team) — identity resolution is the caller's job.
         """
         header = (
-            f":lock: *Approval needed* — <@{requester_id}>'s request wants to run "
-            f"a sensitive action.\n*Tool:* `{tool_name}`\n*Arguments:*\n"
+            f":lock: *Approval needed* — a sensitive action is waiting on sign-off.\n"
+            f"*Requester:* {requester}\n*Tool:* `{tool_name}`\n*Arguments:*\n"
             f"```{tool_arguments}```"
         )
         blocks: list[dict[str, object]] = [

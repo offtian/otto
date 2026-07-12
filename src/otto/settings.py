@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     # `just run` and the compose app container alike).
     runbooks_dir: str = "runbooks"
 
+    # YAML user directory: cross-channel identity (Slack id ↔ Jira account
+    # id) + team per person. Missing file = empty directory; everything
+    # degrades to raw channel ids.
+    users_file: str = "users.yaml"
+
     @property
     def approver_ids(self) -> frozenset[str]:
         """

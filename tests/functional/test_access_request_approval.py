@@ -19,6 +19,7 @@ from openai.types.responses import (
 
 from otto import config
 from otto.application import support
+from otto.domain.identity import users
 from otto.domain.support import approvals, entities
 from otto.settings import Settings
 from otto.vendors import slack as slack_vendor
@@ -91,9 +92,16 @@ class FakeSlackGateway:
         self.updates.append((channel, ts, text))
 
     async def post_approval_card(
-        self, *, channel, approval_id, requester_id, tool_name, tool_arguments
+        self, *, channel, approval_id, requester, tool_name, tool_arguments
     ):
-        self.cards.append({"channel": channel, "approval_id": approval_id, "tool_name": tool_name})
+        self.cards.append(
+            {
+                "channel": channel,
+                "approval_id": approval_id,
+                "requester": requester,
+                "tool_name": tool_name,
+            }
+        )
         return "200.1"
 
     async def fetch_thread(self, *, channel, thread_ts, limit):
@@ -127,7 +135,7 @@ def wire(monkeypatch):
     optionally fake Jira) and return (config, gateway, model).
     """
 
-    def _wire(model, jira=None):
+    def _wire(model, jira=None, directory=()):
         gateway = FakeSlackGateway()
         cfg = config.Configuration(
             settings=Settings(
@@ -139,6 +147,7 @@ def wire(monkeypatch):
             slack=gateway,
             triage=slack_vendor.SlackTriageBackend(gateway=gateway, triage_channel="C_TRIAGE"),
             jira=jira,
+            directory=users.UserDirectory(users=directory),
             approvals=approvals.InMemoryApprovalStore(),
             model=model,
             confluence_mcp=None,
@@ -330,3 +339,57 @@ class TestAccessRequestApprovalFromTicket:
         first_input = json.dumps(model.inputs[0], default=str)
         assert "Conversation so far" in first_input
         assert "Did you restart the client?" in first_input
+
+
+SAM = users.User(
+    name="Sam Support",
+    team="IT Support",
+    slack_user_id="U_SUPPORT",
+    jira_account_id="JIRA_SAM",
+)
+DANA = users.User(name="Dana Data", team="Data Platform", slack_user_id="U_REQ")
+
+
+class TestRequesterIdentity:
+    async def test_cross_channel_self_approval_is_rejected(self, wire):
+        # Given a directory tying Sam's Jira and Slack ids together, and a
+        # ticket Sam filed under their Jira account id
+        cfg, gateway, _ = wire(
+            ScriptedModel([[_access_tool_call()]]),
+            jira=FakeJiraGateway(),
+            directory=[SAM],
+        )
+        await _submit_request(requester_id="JIRA_SAM", origin=TICKET_ORIGIN)
+        approval_id = gateway.cards[0]["approval_id"]
+
+        # When Sam clicks approve in Slack under their Slack id (which holds
+        # the support role)
+        await support.resolve_approval(
+            approval_id=approval_id, resolver_id="U_SUPPORT", approved=True
+        )
+
+        # Then the click is rejected as self-approval — same human, two ids
+        assert (await cfg.approvals.get(approval_id)).status is approvals.ApprovalStatus.PENDING
+        assert gateway.updates == []
+
+    async def test_approval_card_names_the_requester_and_team(self, wire):
+        # Given a directory that knows the requester
+        _cfg, gateway, _ = wire(ScriptedModel([[_access_tool_call()]]), directory=[DANA])
+
+        # When their request pauses for approval
+        await _submit_request(requester_id="U_REQ")
+
+        # Then the card tells the approver who is asking, mention + team
+        assert gateway.cards[0]["requester"] == "<@U_REQ> (Data Platform)"
+
+    async def test_agent_input_carries_the_requester_team(self, wire):
+        # Given a directory that knows the requester's team
+        model = ScriptedModel([[_text("On it.")]])
+        _cfg, _gateway, model = wire(model, directory=[DANA])
+
+        # When their request is handled
+        await _submit_request(requester_id="U_REQ")
+
+        # Then the agent sees name + team, not a bare channel id
+        first_input = json.dumps(model.inputs[0], default=str)
+        assert "Dana Data (team: Data Platform)" in first_input

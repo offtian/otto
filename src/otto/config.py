@@ -13,6 +13,7 @@ Layer rules (enforced by import-linter):
 """
 
 import functools
+import pathlib
 
 import attrs
 import httpx
@@ -20,6 +21,7 @@ from agents import mcp as agents_mcp
 from agents.models import interface as model_interface
 from slack_sdk.web.async_client import AsyncWebClient
 
+from otto.domain.identity import users as identity_users
 from otto.domain.support import approvals
 from otto.settings import Settings, settings
 from otto.vendors import jira as jira_vendor
@@ -38,6 +40,9 @@ class Configuration:
     triage: slack_vendor.SlackTriageBackend
     # None = ticket channel disabled (no jira_base_url configured).
     jira: jira_vendor.JiraGateway | None
+    # Cross-channel requester identity + team; empty when users_file is
+    # absent — lookups just return None.
+    directory: identity_users.UserDirectory
     approvals: approvals.ApprovalStore
     model: model_interface.Model
     # MCP servers are optional: None = capability runs on its local stub
@@ -69,6 +74,9 @@ def get_config() -> Configuration:
             )
             if settings.jira_base_url
             else None
+        ),
+        directory=identity_users.UserDirectory(
+            users=identity_users.load_users(pathlib.Path(settings.users_file))
         ),
         approvals=approvals.InMemoryApprovalStore(),
         model=llm.build_model(

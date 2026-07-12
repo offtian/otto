@@ -1,0 +1,25 @@
+# Otto user directory (prototype): who is behind each channel id.
+#
+# Maps a person's Slack user id and Jira account id to one identity with a
+# team, so the self-approval exclusion works across channels and approvers
+# see who is asking (name + team) on approval cards.
+#
+# Approver ROLES do not live here — they stay in .env
+# (SUPPORT_USER_IDS / ADMIN_USER_IDS, decision D3) until the Phase 2 roles
+# table. Entitlement policy (who may have what) is SailPoint's job.
+#
+# users:
+#   - name: Alice Example
+#     team: Data Platform
+#     slack_user_id: U0123ABCDE
+#     jira_account_id: 5b10a2844c20165700ede21g
+users:
+  - name: Alice Suzanne
+    team: Data Platform
+    slack_user_id: asuzanne
+    jira_account_id: 5b10a2844c20165700ede21g
+
+  - name: Ollie Tian
+    team: AI
+    slack_user_id: otian
+    jira_account_id: 5b10a2844c20165700ede21h

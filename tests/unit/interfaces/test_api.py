@@ -9,6 +9,7 @@ from slack_sdk.signature import SignatureVerifier
 
 from otto import config
 from otto.application import support
+from otto.domain.identity import users
 from otto.domain.support import approvals, entities
 from otto.interfaces import api
 from otto.settings import Settings
@@ -54,6 +55,7 @@ def client(monkeypatch):
         slack=mock.AsyncMock(),
         triage=mock.AsyncMock(),
         jira=jira,
+        directory=users.UserDirectory(users=[]),
         approvals=approvals.InMemoryApprovalStore(),
         model=object(),
         confluence_mcp=None,
