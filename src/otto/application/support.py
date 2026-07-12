@@ -10,6 +10,7 @@ import agents
 import attrs
 
 from otto import config
+from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals, entities
 from otto.utils import logs
@@ -61,7 +62,7 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
         logs.log_event("approval_not_found", params={"approval_id": approval_id})
         return
 
-    if not _may_resolve(resolver_id=resolver_id, pending=pending, cfg=cfg):
+    if not await _may_resolve(resolver_id=resolver_id, pending=pending, cfg=cfg):
         logs.log_event(
             "approval_click_unauthorized",
             params={"approval_id": approval_id, "resolver_id": resolver_id},
@@ -89,7 +90,9 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
     result = await _resume_run(pending=pending, approved=approved, cfg=cfg)
     await _post_reply(origin=pending.origin, text=str(result.final_output), cfg=cfg)
     verdict = "Approved" if approved else "Denied"
-    requester = _requester_label(user_id=pending.requester_id, origin=pending.origin, cfg=cfg)
+    requester = await _requester_label(
+        user_id=pending.requester_id, origin=pending.origin, cfg=cfg
+    )
     await cfg.slack.update_message(
         channel=pending.card_channel,
         ts=pending.card_ts,
@@ -184,7 +187,7 @@ async def mark_resolved(
     :param card_ts: ts of the escalation card.
     """
     cfg = config.get_config()
-    if resolver_id not in cfg.settings.approver_ids:
+    if not await _is_authorized_approver(resolver_id=resolver_id, cfg=cfg):
         logs.log_event(
             "resolve_click_unauthorized",
             params={"resolver_id": resolver_id, "origin_ref": origin_ref},
@@ -263,7 +266,7 @@ async def _conversation_input(
                 if cfg.jira is not None
                 else []
             )
-    requester = _requester_description(user_id=request.user_id, cfg=cfg)
+    requester = await _requester_description(user_id=request.user_id, cfg=cfg)
     if len(history) <= 1:
         return f"Request from {requester}: {request.text}"
     transcript = "\n".join(f"{author}: {text}" for author, text in history)
@@ -274,16 +277,16 @@ async def _conversation_input(
     )
 
 
-def _requester_description(*, user_id: str, cfg: config.Configuration) -> str:
+async def _requester_description(*, user_id: str, cfg: config.Configuration) -> str:
     """
     Return the requester as the agent should see them: name + team when
     the directory knows them, the raw channel id otherwise.
     """
-    user = cfg.directory.find(user_id)
+    user = await cfg.directory.find(user_id)
     return f"{user.name} (team: {user.team})" if user is not None else user_id
 
 
-def _requester_label(
+async def _requester_label(
     *,
     user_id: str,
     origin: entities.Origin,
@@ -294,7 +297,7 @@ def _requester_label(
     team when the directory knows them; a bare mention only when the id
     is a Slack id (a Jira account id renders as garbage inside <@...>).
     """
-    user = cfg.directory.find(user_id)
+    user = await cfg.directory.find(user_id)
     if user is not None:
         mention = f"<@{user.slack_user_id}>" if user.slack_user_id else user.name
         return f"{mention} ({user.team})"
@@ -322,10 +325,13 @@ async def _pause_for_approval(
         tool_arguments=_tool_arguments(interruption),
         run_state_json=result.to_state().to_string(),
     )
+    requester = await _requester_label(
+        user_id=approval.requester_id, origin=request.origin, cfg=cfg
+    )
     card_ts = await cfg.slack.post_approval_card(
         channel=cfg.settings.slack_triage_channel,
         approval_id=approval.id,
-        requester=_requester_label(user_id=approval.requester_id, origin=request.origin, cfg=cfg),
+        requester=requester,
         tool_name=approval.tool_name,
         tool_arguments=approval.tool_arguments,
     )
@@ -376,7 +382,7 @@ async def _resume_run(
     return await agents.Runner.run(agent, state)
 
 
-def _may_resolve(
+async def _may_resolve(
     *,
     resolver_id: str,
     pending: approvals.PendingApproval,
@@ -385,9 +391,26 @@ def _may_resolve(
     # Self-approval prohibited (T3 recommended default — flip here if the
     # open decision lands the other way). The directory makes the check
     # cross-channel: a ticket requester can't approve via their Slack id.
-    return resolver_id in cfg.settings.approver_ids and not cfg.directory.same_person(
-        resolver_id, pending.requester_id
-    )
+    if not await _is_authorized_approver(resolver_id=resolver_id, cfg=cfg):
+        return False
+    return not await cfg.directory.same_person(resolver_id, pending.requester_id)
+
+
+async def _is_authorized_approver(*, resolver_id: str, cfg: config.Configuration) -> bool:
+    """
+    Test whether the clicker holds an approver role (D3). The DB ``role`` is
+    the source of truth (2.3); the settings id-lists are the bootstrap
+    fallback for users not yet migrated. Fail-closed: a role-lookup outage
+    denies rather than risking an unauthorized approval.
+    """
+    try:
+        role = await cfg.directory.role(resolver_id)
+    except Exception as exc:
+        logs.log_exception(exc, params={"guard": "role_lookup", "resolver_id": resolver_id})
+        return False
+    if role in identity_users.APPROVER_ROLES:
+        return True
+    return resolver_id in cfg.settings.approver_ids
 
 
 def _tool_arguments(interruption: agents.ToolApprovalItem) -> str:

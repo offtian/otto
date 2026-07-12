@@ -53,7 +53,7 @@ class Configuration(pydantic.BaseModel):
     jira: pydantic.SkipValidation[jira_vendor.JiraGateway | None]
     # Cross-channel requester identity + team; empty when users_file is
     # absent — lookups just return None.
-    directory: pydantic.SkipValidation[identity_users.UserDirectory]
+    directory: pydantic.SkipValidation[identity_users.Directory]
     approvals: pydantic.SkipValidation[approvals.ApprovalStore]
     model: pydantic.SkipValidation[model_interface.Model]
     # MCP servers are optional: None = capability runs on its local stub
@@ -86,8 +86,14 @@ def get_config() -> Configuration:
             if settings.jira_base_url
             else None
         ),
-        directory=identity_users.UserDirectory(
-            users=identity_users.load_users(pathlib.Path(settings.users_file))
+        # DB-backed directory + live role lookup when a database is configured
+        # (2.3); the yaml directory keeps the zero-dependency dev loop.
+        directory=(
+            identity_users.PostgresUserDirectory(database=data_db.get_db())
+            if settings.database_url
+            else identity_users.UserDirectory(
+                users=identity_users.load_users(pathlib.Path(settings.users_file))
+            )
         ),
         # Durable store when a database is configured (Phase 2); the in-memory
         # store keeps the zero-dependency dev loop when DATABASE_URL is empty.
