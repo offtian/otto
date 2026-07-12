@@ -51,7 +51,7 @@ Marked `[TBC: Tn]` where they appear in the plan. **Open decisions (yours):**
 
 **Status legend:** `[x]` done · `[ ]` 🟡 partial · `[ ]` ⬜ not started · `[ ]` ⏳ needs your decision · `[ ]` 🔒 blocked on an external account/service. The checklist under each phase is the at-a-glance tracker; the table below it holds the full detail (gate, goal, I/O, risks, acceptance criteria) for each step.
 
-**Overall:** Phase 0 — **8/11 done**; 0.8 partial (telemetry test), 0.1 + 0.11 blocked on external accounts. Phase 1 — 1.3 partial (3 of 4 D6 signals), the rest gated on decisions/accounts. Phases 2–3 — not started.
+**Overall:** Phase 0 — **8/11 done**; 0.8 partial (only the live Jaeger span-check left), 0.1 + 0.11 blocked on external accounts. Phase 1 — **1.3 done** (all four D6 signals); the rest gated on decisions/accounts. Phases 2–3 — not started.
 
 ### Phase 0: Walking skeleton — full loop end-to-end on both channels with zero external dependencies
 
@@ -64,7 +64,7 @@ Checkpoint: a Slack DM to @otto gets a stubbed answer; a Jira ticket gets a stub
 - [x] **0.5** Otto agent + tools + conversation reconstruction (D2)
 - [x] **0.6** Confluence read-only enforcement (A1)
 - [x] **0.7** HITL loop with role-gated approvals (D3/FR7) — T3 "prohibit self-approval" applied
-- [ ] **0.8** Telemetry verification — 🟡 wiring landed in 0.4; NFR2 log-content test + manual Jaeger span check still outstanding
+- [ ] **0.8** Telemetry verification — 🟡 wiring + NFR2 log-content test done; only the live Jaeger span-check (needs `just infra` + a real run) remains
 - [x] **0.9** Eval harness + `just eval` recipe — scoped to 3 pytest golden cases (D12); YAML runner + LLM judge deferred to n≈20
 - [x] **0.10** Runbooks (×3), `.env.example`, parity test
 - [ ] **0.11** Phase 0 exit demo — both channels — 🔒 blocked: T7 + T9 (needs live Slack + Jira)
@@ -89,7 +89,7 @@ Checkpoint: real Confluence answers with citations on both channels; resolution 
 
 - [ ] **1.1** Decide the eval-gate location (D5) — ⏳ your call
 - [ ] **1.2** Implement the gate + record/replay tests — ⬜ not started (CI gate after 1.1; cassette tests doable now)
-- [ ] **1.3** Resolution signals (D6 + D6-gap) — 🟡 done: `ticket_status`, `access_granted`, `helpful_vote` (T2 closed → "Did this help?" vote); missing: the support-agent-marks-resolved signal
+- [x] **1.3** Resolution signals (D6 + D6-gap) — all four wired: `ticket_status`, `access_granted`, `helpful_vote` (T2 → "Did this help?" vote), `agent_marked` (support "Mark resolved" button)
 - [ ] **1.4** Connect real Confluence + citations + injection hardening — 🔒 blocked: T6
 - [ ] **1.5** Runbook content → 10 flows — ⬜ not started (3/10; T4 default = synthesized IT flows)
 - [ ] **1.6** Prototype pilot + Phase 1 exit review — ⏳ your call + real usage
