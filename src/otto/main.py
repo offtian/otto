@@ -1,6 +1,8 @@
 """
-Application entry point: ``python -m otto``.
+Application entry point: ``python -m otto`` serves the Otto API.
 """
+
+import uvicorn
 
 from otto import config
 from otto.utils import logs
@@ -8,11 +10,16 @@ from otto.utils import logs
 
 def main() -> None:
     """
-    Run the application.
+    Boot the FastAPI service (Slack events, interactions, health).
     """
     app_config = config.get_config()
     logs.configure_logging(level=app_config.settings.log_level)
-    logs.log_event("app_started", params={"debug": app_config.settings.debug})
+    uvicorn.run(
+        "otto.interfaces.api:app",
+        host="0.0.0.0",
+        port=8000,
+        log_level=app_config.settings.log_level.lower(),
+    )
 
 
 if __name__ == "__main__":
