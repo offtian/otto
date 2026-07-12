@@ -123,6 +123,6 @@ class TestBuildAgent:
             "read_runbook",
             "escalate_to_human",
             "search_knowledge",
-            "request_access",
+            "submit_access_request",
         }
         assert agent.mcp_servers == []

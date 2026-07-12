@@ -9,6 +9,7 @@ by RUN_INTEGRATION so the normal test suite and CI skip it. Run via
 
 import asyncio
 import os
+from datetime import UTC, datetime
 
 import databases
 import pytest
@@ -25,6 +26,9 @@ pytestmark = pytest.mark.skipif(
 DB_URL = _dsn.to_libpq(
     os.environ.get("DATABASE_URL", "postgresql+asyncpg://postgres@localhost:5432/otto")
 )
+
+FAR_FUTURE = datetime(2999, 1, 1, tzinfo=UTC)
+DISTANT_PAST = datetime(2000, 1, 1, tzinfo=UTC)
 
 
 def _pending(
@@ -133,3 +137,66 @@ class TestPostgresApprovalStore:
         assert len(winners) == 1
         assert len(rejected) == 1
         assert (await store.get("ap-1")).status is approvals.ApprovalStatus.APPROVED
+
+
+class TestPostgresApprovalStoreSweep:
+    async def test_expire_pending_marks_stale_approvals_terminal(self, store):
+        # Given a stored pending approval
+        await store.save(_pending())
+
+        # When the sweep expires everything created before a future cutoff
+        expired = await store.expire_pending(cutoff=FAR_FUTURE)
+
+        # Then it comes back EXPIRED with a server-clock terminal timestamp
+        assert [a.id for a in expired] == ["ap-1"]
+        stored = await store.get("ap-1")
+        assert stored.status is approvals.ApprovalStatus.EXPIRED
+        assert stored.resolved_at is not None
+
+    async def test_expire_pending_spares_fresh_approvals(self, store):
+        # Given a just-created pending approval
+        await store.save(_pending())
+
+        # When the cutoff predates it
+        expired = await store.expire_pending(cutoff=DISTANT_PAST)
+
+        # Then nothing expires and it stays pending
+        assert expired == []
+        assert (await store.get("ap-1")).status is approvals.ApprovalStatus.PENDING
+
+    async def test_claim_due_reminders_claims_a_pending_approval_once(self, store):
+        # Given a pending approval past its reminder interval
+        await store.save(_pending())
+
+        # When reminders due before a future cutoff are claimed
+        first = await store.claim_due_reminders(cutoff=FAR_FUTURE)
+
+        # Then it is due once, and not again until another interval elapses
+        assert [a.id for a in first] == ["ap-1"]
+        assert await store.claim_due_reminders(cutoff=DISTANT_PAST) == []
+
+    async def test_purge_resolved_state_nulls_run_state_after_retention(self, store):
+        # Given a resolved approval whose run state is still stored
+        await store.save(_pending())
+        await store.resolve("ap-1", approvals.ApprovalStatus.APPROVED, resolver_id="U_SUPPORT")
+
+        # When the retention cutoff falls after its resolution
+        purged = await store.purge_resolved_state(cutoff=FAR_FUTURE)
+
+        # Then the conversation-bearing run state is dropped (A9)
+        assert purged == 1
+        assert (await store.get("ap-1")).run_state_json == ""
+
+    async def test_purge_resolved_state_spares_pending_and_recent(self, store):
+        # Given one still-pending approval and one just-resolved approval
+        await store.save(_pending("ap-pending"))
+        await store.save(_pending("ap-resolved"))
+        await store.resolve("ap-resolved", approvals.ApprovalStatus.DENIED, resolver_id="U_ADMIN")
+
+        # When the retention cutoff predates the resolution
+        purged = await store.purge_resolved_state(cutoff=DISTANT_PAST)
+
+        # Then nothing is purged — pending state is never touched, recent state is retained
+        assert purged == 0
+        assert (await store.get("ap-pending")).run_state_json == '{"state": "paused"}'
+        assert (await store.get("ap-resolved")).run_state_json == '{"state": "paused"}'

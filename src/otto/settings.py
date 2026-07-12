@@ -22,8 +22,11 @@ class Settings(BaseSettings):
     environment: str = "dev"
 
     # SQLAlchemy-flavoured URL; the databases lib gets the libpq form via
-    # data/_dsn.py. Empty string = no database configured.
-    database_url: str = "postgresql+asyncpg://localhost:5432/otto"
+    # data/_dsn.py. Empty string = no database configured. The `postgres` role
+    # matches the compose Postgres (`just infra`, trust auth) so migrations and
+    # the durable store work zero-config; without a role asyncpg falls back to
+    # the OS user, which the container has no role for.
+    database_url: str = "postgresql+asyncpg://postgres@localhost:5432/otto"
 
     # LLM gateway (any OpenAI-compatible endpoint: LiteLLM, firm proxy, or
     # api.openai.com when base_url is empty).
@@ -54,6 +57,14 @@ class Settings(BaseSettings):
 
     # Max messages of conversation history rebuilt per event (D2).
     thread_history_limit: int = 30
+
+    # Approval maintenance sweep (2.5). The sweep expires stale pending
+    # approvals, nudges the triage channel about the rest, and purges resolved
+    # run state past its retention window. Interval 0 disables the sweep.
+    approval_sweep_interval_minutes: int = 15
+    approval_reminder_minutes: int = 60
+    approval_expiry_minutes: int = 1440  # 24h
+    approval_retention_days: int = 30  # A9 — run_state_json is PII at rest
 
     # Telemetry. Either, both, or neither sink may be enabled: Logfire when
     # a token is set, any OTLP collector when an endpoint is set.

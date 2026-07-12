@@ -16,11 +16,16 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlmodel import SQLModel
 
 from otto.data import models  # noqa: F401
+from otto.settings import settings
 
 
 config = context.config
 
-database_url = os.environ.get("DATABASE_URL", "")
+# Single source of truth for the DB URL: the app's settings (which already fold
+# in DATABASE_URL / .env, defaulting to the compose Postgres), so
+# `just run-db-migrations` works zero-config. alembic.ini's url is only the
+# offline/literal fallback.
+database_url = os.environ.get("DATABASE_URL") or settings.database_url
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url)
 

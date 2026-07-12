@@ -6,6 +6,7 @@ loop, RunState serialization (NFR6), store, and use-cases are all real.
 """
 
 import json
+from datetime import UTC, datetime
 from unittest import mock
 
 import pytest
@@ -41,7 +42,7 @@ def _access_tool_call():
         id="fc-1",
         call_id="call-1",
         type="function_call",
-        name="request_access",
+        name="submit_access_request",
         arguments=json.dumps(
             {"system": "snowflake", "entitlement": "reporting", "justification": "quarterly"}
         ),
@@ -146,7 +147,7 @@ def wire(monkeypatch):
     optionally fake Jira) and return (config, gateway, model).
     """
 
-    def _wire(model, jira=None, directory=()):
+    def _wire(model, jira=None, directory=(), **settings_overrides):
         gateway = FakeSlackGateway()
         cfg = config.Configuration(
             settings=Settings(
@@ -154,6 +155,7 @@ def wire(monkeypatch):
                 slack_triage_channel="C_TRIAGE",
                 support_user_ids="U_SUPPORT",
                 admin_user_ids="U_ADMIN",
+                **settings_overrides,
             ),
             slack=gateway,
             triage=slack_vendor.SlackTriageBackend(gateway=gateway, triage_channel="C_TRIAGE"),
@@ -191,7 +193,7 @@ class TestAccessRequestApproval:
 
         # Then a card lands in the triage channel and the user is told to wait
         assert gateway.cards[0]["channel"] == "C_TRIAGE"
-        assert gateway.cards[0]["tool_name"] == "request_access"
+        assert gateway.cards[0]["tool_name"] == "submit_access_request"
         assert any("human sign-off" in text for _, _, text in gateway.messages)
         # Then the stored approval carries the serialized run state (NFR6)
         pending = await cfg.approvals.get(gateway.cards[0]["approval_id"])
@@ -557,3 +559,42 @@ class TestLogContentBoundary:
         )
         assert captured.info.call_count > 0
         assert sentinel not in logged
+
+
+class TestApprovalSweep:
+    async def test_an_expired_approval_closes_the_card_and_tells_the_origin(self, wire):
+        # Given a pending access request whose approval window has since passed
+        cfg, gateway, _ = wire(ScriptedModel([[_access_tool_call()]]))
+        await _submit_request()
+        approval_id = gateway.cards[0]["approval_id"]
+
+        # When the maintenance sweep runs far past the expiry window
+        await support.sweep_approvals(now=datetime(2999, 1, 1, tzinfo=UTC))
+
+        # Then the approval is terminal — a later click is rejected by the guard
+        assert (await cfg.approvals.get(approval_id)).status is approvals.ApprovalStatus.EXPIRED
+        # Then the triage card is closed out and the requester is told at the origin
+        assert any("Expired" in text for _, _, text in gateway.updates)
+        assert any(
+            channel == "D1" and "expired" in text.lower() for channel, _, text in gateway.messages
+        )
+
+    async def test_a_still_pending_approval_gets_a_threaded_reminder(self, wire):
+        # Given a pending approval whose expiry window outruns the test clock,
+        # so only the reminder fires (created ~now, swept at year 2999)
+        cfg, gateway, _ = wire(
+            ScriptedModel([[_access_tool_call()]]), approval_expiry_minutes=1_000_000_000
+        )
+        await _submit_request()
+        approval_id = gateway.cards[0]["approval_id"]
+
+        # When the sweep runs past the reminder interval
+        await support.sweep_approvals(now=datetime(2999, 1, 1, tzinfo=UTC))
+
+        # Then a reminder is posted under the card and nothing is closed out
+        assert any(
+            thread_ts == "200.1" and "Still waiting" in text
+            for _, thread_ts, text in gateway.messages
+        )
+        assert gateway.updates == []
+        assert (await cfg.approvals.get(approval_id)).status is approvals.ApprovalStatus.PENDING

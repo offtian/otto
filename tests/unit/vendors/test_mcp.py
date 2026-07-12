@@ -24,3 +24,18 @@ class TestConfluenceReadOnly:
 
         # Then it statically allows exactly the read-only tool names
         assert tool_filter == {"allowed_tool_names": list(mcp.CONFLUENCE_READ_TOOLS)}
+
+
+class TestSailpointGate:
+    def test_build_sailpoint_installs_the_supplied_per_tool_gate(self):
+        # Given a per-tool approval gate (the 2.6 default-deny callable)
+        def gate(run_context, agent, tool):
+            return tool.name != "some_read"
+
+        # When a SailPoint server is built with it
+        server = mcp.build_sailpoint(url="http://mcp.local", token="t", require_approval=gate)
+
+        # Then the SDK holds exactly that callable — no blanket override slipped
+        # in (a callable is stored verbatim; a "always" string would normalize
+        # to a bool, so this also guards against a regression to blanket gating)
+        assert server._needs_approval_policy is gate

@@ -5,6 +5,7 @@ approve/deny decision to a paused run (FR1-FR8).
 
 import pathlib
 import uuid
+from datetime import datetime, timedelta
 
 import agents
 import attrs
@@ -206,6 +207,64 @@ async def mark_resolved(
         channel=card_channel,
         ts=card_ts,
         text=f":white_check_mark: Escalation resolved by <@{resolver_id}>.",
+    )
+
+
+async def sweep_approvals(*, now: datetime) -> None:
+    """
+    Run the periodic approval-maintenance sweep (2.5): expire stale pending
+    approvals and close out their cards, nudge the triage channel about the
+    ones still waiting, and purge resolved run state past its retention
+    window (A9 — the serialized conversation is PII at rest).
+
+    :param now: reference time, injected so the sweep is deterministic and the
+        clock is read at the interface layer, not inside the use-case.
+    """
+    cfg = config.get_config()
+    s = cfg.settings
+
+    # Expire first: an approval that ages out this tick must not also be
+    # reminded. Expiry is terminal, so a later click hits the resolve() guard.
+    expired = await cfg.approvals.expire_pending(
+        cutoff=now - timedelta(minutes=s.approval_expiry_minutes)
+    )
+    for approval in expired:
+        await cfg.slack.update_message(
+            channel=approval.card_channel,
+            ts=approval.card_ts,
+            text=(
+                f":hourglass: Expired — `{approval.tool_name}` was not approved "
+                "in time and will not run."
+            ),
+        )
+        await _post_reply(
+            origin=approval.origin,
+            text=(
+                "That request expired before anyone approved it, so I didn't run "
+                "it. Ask again if you still need it."
+            ),
+            cfg=cfg,
+        )
+
+    reminders = await cfg.approvals.claim_due_reminders(
+        cutoff=now - timedelta(minutes=s.approval_reminder_minutes)
+    )
+    for approval in reminders:
+        await cfg.slack.post_message(
+            channel=approval.card_channel,
+            thread_ts=approval.card_ts,
+            text=(
+                f":bell: Still waiting on a decision for `{approval.tool_name}` — "
+                "approve or deny on the card above."
+            ),
+        )
+
+    purged = await cfg.approvals.purge_resolved_state(
+        cutoff=now - timedelta(days=s.approval_retention_days)
+    )
+    logs.log_event(
+        "approval_sweep",
+        params={"expired": len(expired), "reminded": len(reminders), "purged": purged},
     )
 
 

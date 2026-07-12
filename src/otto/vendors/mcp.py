@@ -10,6 +10,7 @@ on shutdown — the FastAPI lifespan in ``interfaces/api.py`` owns that.
 """
 
 from agents import mcp as agents_mcp
+from agents.mcp import server as agents_mcp_server
 
 
 # Read-only enforcement (A1): the dev mcp-atlassian image ships write tools,
@@ -40,17 +41,24 @@ def build_confluence(*, url: str, token: str) -> agents_mcp.MCPServerStreamableH
     )
 
 
-def build_sailpoint(*, url: str, token: str) -> agents_mcp.MCPServerStreamableHttp:
+def build_sailpoint(
+    *,
+    url: str,
+    token: str,
+    require_approval: agents_mcp_server.RequireApprovalSetting,
+) -> agents_mcp.MCPServerStreamableHttp:
     """
-    Return the identity/access MCP server. Every tool on it is treated as
-    sensitive: ``require_approval="always"`` pauses the run for HITL before
-    any SailPoint action executes.
+    Return the identity/access MCP server, gated by the given per-tool
+    approval policy (2.6). ``require_approval`` is required — not defaulted —
+    so a caller can never accidentally mount SailPoint ungated: config passes
+    the default-deny sensitivity gate, which pauses every tool it has not
+    explicitly cleared.
     """
     return agents_mcp.MCPServerStreamableHttp(
         params={"url": url, "headers": _auth_headers(token)},
         name="sailpoint",
         cache_tools_list=True,
-        require_approval="always",
+        require_approval=require_approval,
     )
 
 

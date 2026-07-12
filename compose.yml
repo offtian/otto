@@ -61,7 +61,8 @@ services:
   # App-side: CONFLUENCE_MCP_URL=http://localhost:9000/mcp
   #
   # SailPoint (Phase 2) has no public dev image — point SAILPOINT_MCP_URL at
-  # the firm-hosted server, or add a mock service here.
+  # the firm-hosted server at graduation, or run the deterministic mock below
+  # (profile: sailpoint). App-side: SAILPOINT_MCP_URL=http://localhost:9100/mcp
 
   mcp-confluence:
     profiles: ["mcp"]
@@ -73,6 +74,18 @@ services:
       CONFLUENCE_API_TOKEN: ${CONFLUENCE_API_TOKEN:-}
     ports:
       - "9000:9000"
+
+  # Mock SailPoint MCP (profile: sailpoint) — deterministic stand-in, no public
+  # image exists. Reuses the app image (which already has the mcp lib) and
+  # mounts the script, so there is nothing extra to build.
+  mcp-sailpoint:
+    profiles: ["sailpoint"]
+    build: .
+    command: ["uv", "run", "--no-sync", "python", "/app/dev/sailpoint_mock.py"]
+    volumes:
+      - ./dev/sailpoint_mock.py:/app/dev/sailpoint_mock.py:ro
+    ports:
+      - "9100:9100"
 
   # --- Otto itself (profile: app) --------------------------------------------
 
@@ -88,6 +101,8 @@ services:
       OTLP_ENDPOINT: http://jaeger:4318
       LLM_BASE_URL: http://litellm:4000/v1
       CONFLUENCE_MCP_URL: http://mcp-confluence:9000/mcp
+      # Only reachable when the `sailpoint` profile is also up.
+      SAILPOINT_MCP_URL: http://mcp-sailpoint:9100/mcp
     ports:
       - "8000:8000"
     depends_on:

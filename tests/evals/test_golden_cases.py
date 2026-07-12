@@ -89,6 +89,20 @@ class TestGoldenCases:
         # Then the run pauses on the gated tool instead of finishing
         assert result.interruptions, str(result.final_output)
 
+    async def test_vague_access_request_gathers_details_before_submitting(self):
+        # Given a vague access request missing the entitlement and justification
+        result, _ = await _run_otto("I think I need access to Snowflake.")
+
+        # Then Otto does not submit yet — it gathers the exact entitlement and a
+        # business justification first, never guessing (instructions step 3)
+        assert not result.interruptions, str(result.final_output)
+        answer = str(result.final_output).lower()
+        asks_for_detail = any(
+            word in answer
+            for word in ("entitlement", "justification", "which", "what", "reason", "specific")
+        )
+        assert asks_for_detail, answer
+
     async def test_explicit_human_request_escalates(self):
         # Given a user who asks for a human
         # When Otto handles it

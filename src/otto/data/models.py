@@ -40,6 +40,11 @@ class ApprovalRecord(SQLModel, table=True):
     resolved_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
+    # Last time the triage channel was nudged about this still-pending approval
+    # (2.5). Null = never reminded; the reminder sweep falls back to created_at.
+    reminded_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(tz=UTC),
         sa_column=Column(DateTime(timezone=True), nullable=False),

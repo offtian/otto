@@ -51,7 +51,7 @@ Marked `[TBC: Tn]` where they appear in the plan. **Open decisions (yours):**
 
 **Status legend:** `[x]` done · `[ ]` 🟡 partial · `[ ]` ⬜ not started · `[ ]` ⏳ needs your decision · `[ ]` 🔒 blocked on an external account/service. The checklist under each phase is the at-a-glance tracker; the table below it holds the full detail (gate, goal, I/O, risks, acceptance criteria) for each step.
 
-**Overall:** Phase 0 — **8/11 done**; 0.8 partial (only the live Jaeger span-check left), 0.1 + 0.11 blocked on external accounts. Phase 1 — **1.1/1.3/1.5 done, 1.2 partial** (gate + record/replay tests done; golden set growing); 1.4 blocked on real Confluence (T6), 1.6 needs a real pilot. Phase 2 — **2.2 done & verified** (durable store) + 2.1/2.3 schemas landed; 2.4/2.6 need decisions + compose, 2.5/2.7 build on the store. Phase 3 — not started.
+**Overall:** Phase 0 — **8/11 done**; 0.8 partial (only the live Jaeger span-check left), 0.1 + 0.11 blocked on external accounts. Phase 1 — **1.1/1.3/1.5 done, 1.2 partial** (gate + record/replay tests done; golden set growing); 1.4 blocked on real Confluence (T6), 1.6 needs a real pilot. Phase 2 — **COMPLETE**: 2.1–2.7 all done & verified; exit demonstrated (50 requests, zero unapproved writes, audit report from the store). Phase 3 — not started.
 
 ### Phase 0: Walking skeleton — full loop end-to-end on both channels with zero external dependencies
 
@@ -107,13 +107,13 @@ Checkpoint: real Confluence answers with citations on both channels; resolution 
 
 Checkpoint: 50 access requests (staged against the mock in prototype) with **zero** unapproved writes; audit report generated from the store.
 
-- [ ] **2.1** `ApprovalRecord` schema + retention policy — 🟡 schema + migration + audit fields (`resolve(+resolver_id)`/`resolved_at`) **done & verified against live Postgres** (up/down cycle clean); ⏳ confirm the `run_state_json` retention window (defaulted to 30d)
+- [x] **2.1** `ApprovalRecord` schema + retention policy — **done & verified**: schema + migration + audit fields (`resolver_id`/`resolved_at`) live-Postgres up/down clean; `run_state_json` retention window **confirmed 30d (2026-07-12)**, enforced by the 2.5 sweep
 - [x] **2.2** `PostgresApprovalStore` — **done & verified**: conditional-UPDATE store, config swap (Postgres when `DATABASE_URL` set), lifespan connect; 7 integration tests incl. concurrent-resolve; drain runbook (`docs/drain-approvals.md`)
 - [x] **2.3** Roles → Postgres table (+ fold in the D15 identity directory) — **done & verified**: `PostgresUserDirectory` (live, fail-closed) swapped in by config; role check = DB role → settings bootstrap fallback; 3 integration tests incl. live role-revocation
-- [ ] **2.4** SailPoint MCP — mock now, real at graduation — ⏳ your call + 🔒 T8 mock surface
-- [ ] **2.5** Expiry, reminders, retention sweep — ⬜ not started
-- [ ] **2.6** Per-tool sensitivity policy incl. ticket transitions (D10) — ⏳ your call
-- [ ] **2.7** Audit report + Phase 2 exit — ⏳ your call
+- [x] **2.4** SailPoint MCP — mock now, real at graduation — **done** (T8 surface resolved 2026-07-12): `dev/sailpoint_mock.py` FastMCP service (5 tools, deterministic state) under the `sailpoint` compose profile + `SAILPOINT_MCP_URL`; agent + stub renamed to the native `submit_access_request`; live gate-coverage test proves every mounted write pauses and reads flow (verified against the running mock); collect-justification eval case added. Real endpoint + service-account scopes remain `[GRADUATION]`
+- [x] **2.5** Expiry, reminders, retention sweep — **done**: EXPIRED status + 3 conditional-UPDATE store methods (expire/remind/purge), `reminded_at` column + migration 0003 (up/down clean), 4 sweep settings, `sweep_approvals` use-case, in-process lifespan sweep loop; unit + functional + 12 live-Postgres integration tests
+- [x] **2.6** Per-tool sensitivity policy incl. ticket transitions (D10) — **done**: default-deny `SensitivityPolicy` in `domain/support/policy.py` adapted to the SDK per-tool **callable** (the dict form defaults unlisted tools *ungated* — the silent un-gate this forbids); reads ungated w/ sign-off markers, writes + unknown tools + Jira transitions gated; CI test fails on an unmarked un-gate
+- [x] **2.7** Audit report + Phase 2 exit — **done & verified**: audit projection + report (status breakdown, authorized-write count, median/max decision turnaround) in `domain/support/audit.py`; `list_audit_entries` on the store; `generate_audit_report` use-case + `just audit-report` CLI; **50-request exit demo against live Postgres + the mock proves zero unapproved writes** (40 approved → 40 mock writes; 7 denied + 3 expired → 0), report generated from the store
 
 | # | Step | Gate | Goal | I/O | Risks | Acceptance criteria |
 |---|---|---|---|---|---|---|

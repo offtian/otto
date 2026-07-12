@@ -6,16 +6,36 @@ channel/concern). This module owns only what is app-wide: telemetry + MCP
 lifecycle, the dedup remember-set, and Otto's cached Jira identity.
 """
 
+import asyncio
 import collections
 import contextlib
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import fastapi
 
 from otto import config
+from otto.application import support
 from otto.data import db as data_db
 from otto.interfaces.routers import base, jira, slack
 from otto.utils import logs, telemetry
+
+
+async def _sweep_loop(interval_seconds: int) -> None:
+    """
+    Run the approval-maintenance sweep (2.5) every ``interval_seconds`` for the
+    life of the process. A failed tick is logged and the loop continues — a
+    transient DB blip must not stop expiry/retention forever.
+
+    ponytail: in-process, single-replica — two replicas would double every
+    reminder. Move to a locked/leader job before running replicas (Phase 3).
+    """
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await support.sweep_approvals(now=datetime.now(tz=UTC))
+        except Exception as exc:
+            logs.log_exception(exc, params={"job": "approval_sweep"})
 
 
 class _RecentIds:
@@ -57,8 +77,19 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
     servers = [s for s in (cfg.confluence_mcp, cfg.sailpoint_mcp) if s is not None]
     for server in servers:
         await server.connect()  # type: ignore[no-untyped-call]  # SDK method lacks annotations
+    # Approval maintenance sweep (2.5): only meaningful against the durable
+    # store, and the interval is a kill switch (0 = off).
+    sweep_task: asyncio.Task[None] | None = None
+    if cfg.settings.database_url and cfg.settings.approval_sweep_interval_minutes > 0:
+        sweep_task = asyncio.create_task(
+            _sweep_loop(cfg.settings.approval_sweep_interval_minutes * 60)
+        )
     logs.log_event("app_started", params={"otto_enabled": cfg.settings.otto_enabled})
     yield
+    if sweep_task is not None:
+        sweep_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweep_task
     for server in servers:
         await server.cleanup()  # type: ignore[no-untyped-call]  # SDK method lacks annotations
     if cfg.settings.database_url:

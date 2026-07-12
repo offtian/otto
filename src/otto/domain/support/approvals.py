@@ -16,13 +16,17 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql as pg
 
 from otto.data import models
-from otto.domain.support import entities
+from otto.domain.support import audit, entities
 
 
 class ApprovalStatus(enum.StrEnum):
     PENDING = "pending"
     APPROVED = "approved"
     DENIED = "denied"
+    # Terminal, set by the maintenance sweep (2.5) when nobody decided in time.
+    # An expired approval is no longer pending, so the resolve() guard rejects
+    # a late click exactly as it does an already-decided one.
+    EXPIRED = "expired"
 
 
 class ApprovalNotFound(Exception):
@@ -93,6 +97,40 @@ class ApprovalStore(Protocol):
         """
         ...
 
+    async def expire_pending(self, *, cutoff: datetime) -> list[PendingApproval]:
+        """
+        Transition every approval still pending since before ``cutoff`` to
+        ``EXPIRED`` and return the ones just expired (so their cards can be
+        closed out). Guarded on ``status = pending``, so it never races a
+        concurrent resolve — whichever lands first wins, the other is rejected.
+        """
+        ...
+
+    async def claim_due_reminders(self, *, cutoff: datetime) -> list[PendingApproval]:
+        """
+        Return the pending approvals last nudged (or, if never, created)
+        before ``cutoff``, stamping their reminder time to now so the next
+        sweep waits another interval. Each due approval is claimed once.
+        """
+        ...
+
+    async def purge_resolved_state(self, *, cutoff: datetime) -> int:
+        """
+        Null out ``run_state_json`` on terminal approvals that reached their
+        terminal state before ``cutoff`` (A9 — the conversation-bearing run
+        state is PII at rest once its run can no longer resume). Returns the
+        number of approvals purged.
+        """
+        ...
+
+    async def list_audit_entries(self) -> list[audit.AuditEntry]:
+        """
+        Return an audit projection of every approval (2.7), oldest first — the
+        system-of-record read the audit report is built from. Excludes the
+        conversation-bearing run state.
+        """
+        ...
+
 
 class InMemoryApprovalStore:
     """
@@ -102,9 +140,16 @@ class InMemoryApprovalStore:
 
     def __init__(self) -> None:
         self._approvals: dict[str, PendingApproval] = {}
+        # Sweep bookkeeping the entity does not carry (created_at/reminded_at
+        # are DB-managed columns in the durable store).
+        self._created_at: dict[str, datetime] = {}
+        self._reminded_at: dict[str, datetime] = {}
 
     async def save(self, approval: PendingApproval) -> None:
         self._approvals[approval.id] = approval
+        # First save wins the creation time; a re-save (insert-or-replace)
+        # never resets it, mirroring the Postgres on_conflict behaviour.
+        self._created_at.setdefault(approval.id, datetime.now(tz=UTC))
 
     async def get(self, approval_id: str) -> PendingApproval:
         try:
@@ -130,6 +175,60 @@ class InMemoryApprovalStore:
         )
         self._approvals[approval_id] = resolved
         return resolved
+
+    async def expire_pending(self, *, cutoff: datetime) -> list[PendingApproval]:
+        now = datetime.now(tz=UTC)
+        expired: list[PendingApproval] = []
+        for approval_id, approval in list(self._approvals.items()):
+            if approval.status is not ApprovalStatus.PENDING:
+                continue
+            if self._created_at.get(approval_id, now) >= cutoff:
+                continue
+            evolved = attrs.evolve(approval, status=ApprovalStatus.EXPIRED, resolved_at=now)
+            self._approvals[approval_id] = evolved
+            expired.append(evolved)
+        return expired
+
+    async def claim_due_reminders(self, *, cutoff: datetime) -> list[PendingApproval]:
+        now = datetime.now(tz=UTC)
+        due: list[PendingApproval] = []
+        for approval_id, approval in self._approvals.items():
+            if approval.status is not ApprovalStatus.PENDING:
+                continue
+            last = self._reminded_at.get(approval_id) or self._created_at.get(approval_id, now)
+            if last >= cutoff:
+                continue
+            self._reminded_at[approval_id] = now
+            due.append(approval)
+        return due
+
+    async def purge_resolved_state(self, *, cutoff: datetime) -> int:
+        purged = 0
+        for approval_id, approval in list(self._approvals.items()):
+            if approval.status is ApprovalStatus.PENDING:
+                continue
+            if approval.resolved_at is None or approval.resolved_at >= cutoff:
+                continue
+            if not approval.run_state_json:
+                continue
+            self._approvals[approval_id] = attrs.evolve(approval, run_state_json="")
+            purged += 1
+        return purged
+
+    async def list_audit_entries(self) -> list[audit.AuditEntry]:
+        entries = [
+            audit.AuditEntry(
+                approval_id=approval.id,
+                requester_id=approval.requester_id,
+                tool_name=approval.tool_name,
+                status=approval.status.value,
+                resolver_id=approval.resolver_id,
+                created_at=self._created_at[approval_id],
+                resolved_at=approval.resolved_at,
+            )
+            for approval_id, approval in self._approvals.items()
+        ]
+        return sorted(entries, key=lambda entry: entry.created_at)
 
 
 # SQLModel exposes the SQLAlchemy Table at runtime; mypy needs the hint.
@@ -193,6 +292,82 @@ class PostgresApprovalStore:
         if exists is None:
             raise ApprovalNotFound(f"no approval with id {approval_id!r}")
         raise ApprovalAlreadyResolved(f"approval {approval_id!r} is already resolved")
+
+    async def expire_pending(self, *, cutoff: datetime) -> list[PendingApproval]:
+        table = _TABLE
+        update = (
+            sa.update(table)
+            .where(
+                sa.and_(
+                    table.c.status == ApprovalStatus.PENDING.value,
+                    table.c.created_at < cutoff,
+                )
+            )
+            .values(status=ApprovalStatus.EXPIRED.value, resolved_at=sa.func.now())
+            .returning(*table.c)
+        )
+        rows = await self.database.fetch_all(update)
+        return [_from_row(row) for row in rows]
+
+    async def claim_due_reminders(self, *, cutoff: datetime) -> list[PendingApproval]:
+        table = _TABLE
+        update = (
+            sa.update(table)
+            .where(
+                sa.and_(
+                    table.c.status == ApprovalStatus.PENDING.value,
+                    sa.func.coalesce(table.c.reminded_at, table.c.created_at) < cutoff,
+                )
+            )
+            .values(reminded_at=sa.func.now())
+            .returning(*table.c)
+        )
+        rows = await self.database.fetch_all(update)
+        return [_from_row(row) for row in rows]
+
+    async def purge_resolved_state(self, *, cutoff: datetime) -> int:
+        table = _TABLE
+        update = (
+            sa.update(table)
+            .where(
+                sa.and_(
+                    table.c.status != ApprovalStatus.PENDING.value,
+                    table.c.resolved_at.is_not(None),
+                    table.c.resolved_at < cutoff,
+                    table.c.run_state_json.is_not(None),
+                )
+            )
+            .values(run_state_json=None)
+            .returning(table.c.id)
+        )
+        rows = await self.database.fetch_all(update)
+        return len(rows)
+
+    async def list_audit_entries(self) -> list[audit.AuditEntry]:
+        table = _TABLE
+        rows = await self.database.fetch_all(
+            sa.select(
+                table.c.id,
+                table.c.requester_id,
+                table.c.tool_name,
+                table.c.status,
+                table.c.resolver_id,
+                table.c.created_at,
+                table.c.resolved_at,
+            ).order_by(table.c.created_at)
+        )
+        return [
+            audit.AuditEntry(
+                approval_id=row["id"],
+                requester_id=row["requester_id"],
+                tool_name=row["tool_name"],
+                status=row["status"],
+                resolver_id=row["resolver_id"],
+                created_at=row["created_at"],
+                resolved_at=row["resolved_at"],
+            )
+            for row in rows
+        ]
 
 
 def _to_row(approval: PendingApproval) -> dict[str, object]:

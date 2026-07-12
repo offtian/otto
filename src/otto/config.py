@@ -24,6 +24,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from otto.data import db as data_db
 from otto.domain.identity import users as identity_users
 from otto.domain.support import approvals
+from otto.domain.support import policy as support_policy
 from otto.settings import Settings, settings
 from otto.vendors import jira as jira_vendor
 from otto.vendors import llm, mcp
@@ -119,6 +120,7 @@ def get_config() -> Configuration:
             mcp.build_sailpoint(
                 url=settings.sailpoint_mcp_url,
                 token=settings.sailpoint_mcp_token,
+                require_approval=support_policy.SENSITIVITY_GATE,
             )
             if settings.sailpoint_mcp_url
             else None

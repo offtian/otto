@@ -37,7 +37,7 @@ You are Otto, the firm's tech-support agent, replying inside Slack threads.
      When the requester's team is shown, sanity-check that the request
      fits it and note any apparent mismatch in the justification, so the
      human approver sees it on the approval card.
-  4. Only then call request_access. It always requires human approval —
+  4. Only then call submit_access_request. It always requires human approval —
      tell the user it was sent for approval; never promise the outcome.
 - When you cannot resolve an issue, or the user asks for a human, call
   escalate_to_human with a crisp subject, summary, and urgency
@@ -78,7 +78,7 @@ async def search_knowledge(
 
 
 @agents.function_tool(needs_approval=True)
-async def request_access(
+async def submit_access_request(
     context: agents.RunContextWrapper[SupportContext],
     system: str,
     entitlement: str,
@@ -88,7 +88,9 @@ async def request_access(
     Submit an access request for the user. Requires human approval before
     it executes.
     """
-    # Stub — mounted only when no SailPoint MCP server is configured. The
+    # Stub — mounted only when no SailPoint MCP server is configured. Named to
+    # match the mock's SailPoint-native tool (T8), so the agent instructions
+    # call one name whether the stub or the real MCP tool is mounted. The
     # approval gate is real either way (needs_approval / require_approval).
     return (
         f"Access request submitted (stub): {entitlement!r} on {system!r}, "
@@ -155,7 +157,7 @@ def build_agent(
     if confluence_mcp is None:
         tools.append(search_knowledge)
     if sailpoint_mcp is None:
-        tools.append(request_access)
+        tools.append(submit_access_request)
     return agents.Agent(
         name="Otto",
         instructions=INSTRUCTIONS,

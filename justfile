@@ -39,9 +39,9 @@ run:
 infra:
     docker compose up -d
 
-# Start the full dev stack (+ LLM gateway, Confluence MCP, containerized app)
+# Start the full dev stack (+ LLM gateway, Confluence + SailPoint MCP, app)
 stack:
-    docker compose --profile gateway --profile mcp --profile app up -d --build
+    docker compose --profile gateway --profile mcp --profile sailpoint --profile app up -d --build
 
 # Expose the app publicly for Slack and tail the URL
 tunnel:
@@ -108,15 +108,21 @@ check-imports:
 
 # Run pending migrations
 run-db-migrations:
-    uv run python -m alembic -c src/otto/data/alembic.ini upgrade head
+    # PYTHONPATH: the editable .pth is unreliable on macOS (UF_HIDDEN + py3.13),
+    # and alembic's env.py imports otto — without this it fails ModuleNotFoundError.
+    PYTHONPATH=src uv run python -m alembic -c src/otto/data/alembic.ini upgrade head
 
 # Generate a new migration
 build-migration MESSAGE:
-    uv run python -m alembic -c src/otto/data/alembic.ini revision --autogenerate -m "{{ MESSAGE }}"
+    PYTHONPATH=src uv run python -m alembic -c src/otto/data/alembic.ini revision --autogenerate -m "{{ MESSAGE }}"
 
 # Roll back one migration
 downgrade-db-migration:
-    uv run python -m alembic -c src/otto/data/alembic.ini downgrade -1
+    PYTHONPATH=src uv run python -m alembic -c src/otto/data/alembic.ini downgrade -1
+
+# Print the approval audit report from the durable store (2.7)
+audit-report:
+    PYTHONPATH=src uv run python -m otto.interfaces.audit_report
 
 # Housekeeping
 # ------------
