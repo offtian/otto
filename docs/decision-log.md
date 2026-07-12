@@ -7,6 +7,15 @@ this log preserves *how we got there*.
 
 ---
 
+## 2026-07-12 — Ticket channel landed + requester identity
+
+Two follow-ups after the walking skeleton, same day:
+
+| ID | Decision | Status | Notes |
+|---|---|---|---|
+| D11 | **Closed** — live Jira intake is implemented in Phase 0 after all (the plan's 0.2/0.4/0.5 Jira halves): `vendors/jira.py`, `/jira/webhook` (secret = HMAC `X-Hub-Signature` *or* `?secret=` URL token, fail-closed), own-actor loop filter via a lazily cached `myself` lookup (fail-closed: unknown bot identity ⇒ events dropped, no loop possible), ticket-history reconstruction, comment replies. | Superseded | The deferral note stands as history; only the 0.1 dev accounts (T7/T9) and the 0.11 demo remain external. |
+| D15 | **Requester identity is a first-class domain concept**: `domain/identity` defines `User` (name, team, Slack user id, Jira account id) and a `UserDirectory` loaded from `users.yaml` (path in settings; missing file = empty directory). Used for: **cross-channel self-approval exclusion** (T3 — a ticket requester cannot approve their own request via their Slack id), requester **name + team on approval cards** (the approver is the access-control decider; this is their context), and requester team in the **agent input** so it can sanity-check access requests against the team. | Confirmed | Surfaced by the D8 two-channel reality: requester ids were channel-local (Slack id vs Jira accountId), so the T3 guard silently did not hold for ticket-origin requests. **Roles stay in settings (D3)** — the directory carries identity + team only; step 2.3 merges both into Postgres. **Entitlement policy stays SailPoint's job** — the directory is a lookup, not a shadow identity system. Unmapped ids degrade to today's raw-id behavior. |
+
 ## 2026-07-12 — Phase 0 implementation (ponytail pass)
 
 The walking skeleton landed after a lazy-review of the PRD/plan. Scope cuts
