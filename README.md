@@ -20,6 +20,14 @@ just run
 
 Commit `uv.lock` — CI installs with `uv sync --locked`.
 
+## Documentation
+
+| Doc | What it is |
+| --- | --- |
+| [docs/PRD.md](docs/PRD.md) | Product requirements & phased delivery plan (living) |
+| [docs/implementation-plan.md](docs/implementation-plan.md) | Staged implementation plan with approval gates & acceptance criteria (living) |
+| [docs/decision-log.md](docs/decision-log.md) | Dated record of audit findings and direction-setting decisions (append-only) |
+
 ## Development
 
 ```bash
