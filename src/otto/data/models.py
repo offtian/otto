@@ -44,3 +44,22 @@ class ApprovalRecord(SQLModel, table=True):
         default_factory=lambda: datetime.now(tz=UTC),
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )
+
+
+class UserRecord(SQLModel, table=True):
+    """
+    Durable identity + approver role — the Phase 2 (2.3) home for what the
+    ``users.yaml`` directory (D15) and the D3 approver-id settings lists carry
+    in the prototype. Surrogate id because a person may have only one of the
+    channel ids; role is a single column (``support_user``/``admin``/empty) —
+    a user_roles join table is the graduation shape if many roles are needed.
+    """
+
+    __tablename__ = "users"
+
+    id: str = Field(primary_key=True)
+    name: str
+    team: str = ""
+    slack_user_id: str = Field(default="", index=True)
+    jira_account_id: str = Field(default="", index=True)
+    role: str = Field(default="", index=True)
