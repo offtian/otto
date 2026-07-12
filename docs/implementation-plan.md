@@ -51,7 +51,7 @@ Marked `[TBC: Tn]` where they appear in the plan. **Open decisions (yours):**
 
 **Status legend:** `[x]` done · `[ ]` 🟡 partial · `[ ]` ⬜ not started · `[ ]` ⏳ needs your decision · `[ ]` 🔒 blocked on an external account/service. The checklist under each phase is the at-a-glance tracker; the table below it holds the full detail (gate, goal, I/O, risks, acceptance criteria) for each step.
 
-**Overall:** Phase 0 — **8/11 done**; 0.8 partial (only the live Jaeger span-check left), 0.1 + 0.11 blocked on external accounts. Phase 1 — **1.3 done** (all four D6 signals); the rest gated on decisions/accounts. Phases 2–3 — not started.
+**Overall:** Phase 0 — **8/11 done**; 0.8 partial (only the live Jaeger span-check left), 0.1 + 0.11 blocked on external accounts. Phase 1 — **1.1/1.3/1.5 done, 1.2 partial** (gate + record/replay tests done; golden set growing); 1.4 blocked on real Confluence (T6), 1.6 needs a real pilot. Phases 2–3 — not started.
 
 ### Phase 0: Walking skeleton — full loop end-to-end on both channels with zero external dependencies
 
@@ -87,11 +87,11 @@ Checkpoint: a Slack DM to @otto gets a stubbed answer; a Jira ticket gets a stub
 
 Checkpoint: real Confluence answers with citations on both channels; resolution metric (per D6) live; eval gate enforced per the D5 decision. Targets are directional at prototype scale (D7).
 
-- [ ] **1.1** Decide the eval-gate location (D5) — ⏳ your call
-- [ ] **1.2** Implement the gate + record/replay tests — ⬜ not started (CI gate after 1.1; cassette tests doable now)
+- [x] **1.1** Decide the eval-gate location (D5) — closed: cassette-gated CI + on-demand LLM eval (`workflow_dispatch` / `just eval`)
+- [ ] **1.2** Implement the gate + record/replay tests — 🟡 done: deterministic agent-loop tests + `workflow_dispatch` eval job; golden set 8/20 (grows with T5 + real-KB at 1.4), LLM judge deferred. Verified 7/8 on local gemma4 (8th is a 4B tool-calling limit)
 - [x] **1.3** Resolution signals (D6 + D6-gap) — all four wired: `ticket_status`, `access_granted`, `helpful_vote` (T2 → "Did this help?" vote), `agent_marked` (support "Mark resolved" button)
 - [ ] **1.4** Connect real Confluence + citations + injection hardening — 🔒 blocked: T6
-- [ ] **1.5** Runbook content → 10 flows — ⬜ not started (3/10; T4 default = synthesized IT flows)
+- [x] **1.5** Runbook content → 10 flows — synthesized IT flows (T4 default); per-runbook eval cases still partial
 - [ ] **1.6** Prototype pilot + Phase 1 exit review — ⏳ your call + real usage
 
 | # | Step | Gate | Goal | I/O | Risks | Acceptance criteria |
