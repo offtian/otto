@@ -100,17 +100,34 @@ class FakeSlackGateway:
         return []
 
 
+class FakeJiraGateway:
+    def __init__(self, conversation=None):
+        self.comments = []  # (issue_key, text)
+        self.conversation = conversation or []
+
+    async def post_comment(self, *, issue_key, text):
+        self.comments.append((issue_key, text))
+        return "10001"
+
+    async def fetch_conversation(self, *, issue_key, limit):
+        return self.conversation[-limit:]
+
+    async def get_myself_account_id(self):
+        return "OTTO_BOT"
+
+
 ORIGIN = entities.SlackThread(channel_id="D1", thread_ts="1.0")
+TICKET_ORIGIN = entities.TicketRef(issue_key="IT-7")
 
 
 @pytest.fixture
 def wire(monkeypatch):
     """
-    Wire a full Configuration around a scripted model + fake Slack and
-    return (config, gateway, model).
+    Wire a full Configuration around a scripted model + fake Slack (and
+    optionally fake Jira) and return (config, gateway, model).
     """
 
-    def _wire(model):
+    def _wire(model, jira=None):
         gateway = FakeSlackGateway()
         cfg = config.Configuration(
             settings=Settings(
@@ -121,6 +138,7 @@ def wire(monkeypatch):
             ),
             slack=gateway,
             triage=slack_vendor.SlackTriageBackend(gateway=gateway, triage_channel="C_TRIAGE"),
+            jira=jira,
             approvals=approvals.InMemoryApprovalStore(),
             model=model,
             confluence_mcp=None,
@@ -132,12 +150,12 @@ def wire(monkeypatch):
     return _wire
 
 
-async def _submit_request(requester_id="U_REQ"):
+async def _submit_request(requester_id="U_REQ", origin=ORIGIN):
     request = entities.SupportRequest(
         id="Ev-1",
         user_id=requester_id,
         text="I need Snowflake reporting access",
-        origin=ORIGIN,
+        origin=origin,
     )
     await support.handle_support_request(request=request)
     return request
@@ -259,3 +277,57 @@ class TestAccessRequestApproval:
         # Then the run resumed exactly once and the card was updated exactly once
         assert len(model.inputs) == run_count_after_first_click
         assert len(gateway.updates) == 1
+
+
+class TestAccessRequestApprovalFromTicket:
+    async def test_ticket_request_pauses_and_notifies_via_a_comment(self, wire):
+        # Given a model that asks for the gated access tool and a Jira-origin request
+        jira = FakeJiraGateway()
+        _cfg, gateway, _ = wire(ScriptedModel([[_access_tool_call()]]), jira=jira)
+
+        # When the request is handled
+        await _submit_request(origin=TICKET_ORIGIN)
+
+        # Then the approval card still lands in Slack (FR7 — cards always live there)
+        assert gateway.cards[0]["channel"] == "C_TRIAGE"
+
+        # Then the requester is told to wait on their ticket, not in Slack
+        assert any("human sign-off" in text for key, text in jira.comments if key == "IT-7")
+
+    async def test_approval_outcome_is_delivered_as_a_ticket_comment(self, wire):
+        # Given a paused access request that originated from a ticket
+        jira = FakeJiraGateway()
+        model = ScriptedModel([[_access_tool_call()], [_text("Submitted for provisioning.")]])
+        _cfg, gateway, _ = wire(model, jira=jira)
+        await _submit_request(origin=TICKET_ORIGIN)
+        approval_id = gateway.cards[0]["approval_id"]
+
+        # When an authorized approver approves it from Slack
+        await support.resolve_approval(
+            approval_id=approval_id, resolver_id="U_SUPPORT", approved=True
+        )
+
+        # Then the outcome lands at the origin — as a comment on the ticket
+        assert ("IT-7", "Submitted for provisioning.") in jira.comments
+        assert "U_SUPPORT" in gateway.updates[-1][2]
+
+    async def test_ticket_history_is_rebuilt_into_the_agent_input(self, wire):
+        # Given a ticket with an existing back-and-forth in its comments (D2)
+        jira = FakeJiraGateway(
+            conversation=[
+                ("U_REQ", "My VPN fails on hotel wifi"),
+                ("U_HELPER", "Did you restart the client?"),
+                ("U_REQ", "Yes, still failing"),
+            ]
+        )
+        model = ScriptedModel([[_text("Let's check the runbook next.")]])
+        _cfg, _gateway, model = wire(model, jira=jira)
+
+        # When a follow-up event on that ticket is handled
+        await _submit_request(origin=TICKET_ORIGIN)
+
+        # Then the agent sees the reconstructed, untrusted-framed conversation
+        first_input = json.dumps(model.inputs[0], default=str)
+        assert "Conversation so far" in first_input
+        assert "Did you restart the client?" in first_input
+

@@ -15,6 +15,7 @@ from otto.settings import Settings
 
 
 SIGNING_SECRET = "test-signing-secret"
+JIRA_WEBHOOK_SECRET = "test-jira-webhook-secret"
 
 
 def _signed_headers(body: bytes) -> dict[str, str]:
@@ -44,11 +45,15 @@ def client(monkeypatch):
         slack_signing_secret=SIGNING_SECRET,
         slack_triage_channel="C_TRIAGE",
         support_user_ids="U_SUPPORT",
+        jira_webhook_secret=JIRA_WEBHOOK_SECRET,
     )
+    jira = mock.AsyncMock()
+    jira.get_myself_account_id.return_value = "OTTO_BOT"
     cfg = config.Configuration(
         settings=settings,
         slack=mock.AsyncMock(),
         triage=mock.AsyncMock(),
+        jira=jira,
         approvals=approvals.InMemoryApprovalStore(),
         model=object(),
         confluence_mcp=None,
@@ -56,6 +61,7 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(config, "get_config", lambda: cfg)
     api.app.state.recent_events = api._RecentIds()
+    api.app.state.jira_bot_account_id = None
     return testclient.TestClient(api.app), cfg
 
 
@@ -217,6 +223,143 @@ class TestSlackInteractions:
         # Then it is acked and dropped
         assert response.status_code == 200
         assert resolver.await_count == 0
+
+
+def _jira_issue_payload(issue_id: str = "10001") -> bytes:
+    return json.dumps(
+        {
+            "webhookEvent": "jira:issue_created",
+            "issue": {
+                "id": issue_id,
+                "key": "IT-1",
+                "fields": {
+                    "summary": "VPN down",
+                    "description": "It fails on hotel wifi",
+                    "reporter": {"accountId": "USER_ACCT"},
+                },
+            },
+        }
+    ).encode()
+
+
+def _jira_comment_payload(comment_id: str = "20001", author: str = "USER_ACCT") -> bytes:
+    return json.dumps(
+        {
+            "webhookEvent": "comment_created",
+            "issue": {"id": "10001", "key": "IT-1"},
+            "comment": {"id": comment_id, "author": {"accountId": author}, "body": "any update?"},
+        }
+    ).encode()
+
+
+JIRA_URL = f"/jira/webhook?secret={JIRA_WEBHOOK_SECRET}"
+
+
+class TestJiraWebhook:
+    def test_rejects_a_wrong_secret(self, client):
+        # Given a valid payload sent with the wrong webhook secret
+        http, _ = client
+
+        # When it is posted
+        response = http.post("/jira/webhook?secret=wrong", content=_jira_issue_payload())
+
+        # Then the request is rejected before any handling
+        assert response.status_code == 401
+
+    def test_normalizes_a_new_issue_into_a_support_request(self, client, monkeypatch):
+        # Given a handler spy
+        http, _ = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+
+        # When an issue-created event arrives with the shared secret
+        response = http.post(JIRA_URL, content=_jira_issue_payload())
+
+        # Then the handler receives the channel-neutral request shape
+        assert response.status_code == 200
+        handler.assert_awaited_once_with(
+            request=entities.SupportRequest(
+                id="jira:issue:10001",
+                user_id="USER_ACCT",
+                text="VPN down\n\nIt fails on hotel wifi",
+                origin=entities.TicketRef(issue_key="IT-1"),
+            )
+        )
+
+    def test_dispatches_a_user_comment(self, client, monkeypatch):
+        # Given a handler spy
+        http, _ = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+
+        # When a comment-created event from a human arrives
+        http.post(JIRA_URL, content=_jira_comment_payload())
+
+        # Then it is handled as a ticket-origin request
+        handler.assert_awaited_once_with(
+            request=entities.SupportRequest(
+                id="jira:comment:20001",
+                user_id="USER_ACCT",
+                text="any update?",
+                origin=entities.TicketRef(issue_key="IT-1"),
+            )
+        )
+
+    def test_ignores_ottos_own_comments_to_prevent_reply_loops(self, client, monkeypatch):
+        # Given a handler spy and a comment authored by Otto's own account
+        http, _ = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+        body = _jira_comment_payload(author="OTTO_BOT")
+
+        # When the webhook event for Otto's own comment arrives
+        response = http.post(JIRA_URL, content=body)
+
+        # Then it is acked but never handled — no reply loop
+        assert response.status_code == 200
+        assert handler.await_count == 0
+
+    def test_fails_closed_when_the_bot_identity_is_unavailable(self, client, monkeypatch):
+        # Given the myself lookup fails, so Otto cannot tell its own events apart
+        http, cfg = client
+        cfg.jira.get_myself_account_id.side_effect = RuntimeError("jira down")
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+
+        # When a human comment arrives
+        response = http.post(JIRA_URL, content=_jira_comment_payload())
+
+        # Then it is acked but not handled — the loop guard fails closed
+        assert response.status_code == 200
+        assert handler.await_count == 0
+
+    def test_processes_a_duplicate_delivery_only_once(self, client, monkeypatch):
+        # Given a handler spy and the same event delivered twice
+        http, _ = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+        body = _jira_issue_payload(issue_id="10002")
+
+        # When both deliveries arrive
+        http.post(JIRA_URL, content=body)
+        http.post(JIRA_URL, content=body)
+
+        # Then the request is handled exactly once
+        assert handler.await_count == 1
+
+    def test_kill_switch_acks_without_handling(self, client, monkeypatch):
+        # Given the kill switch is off
+        http, cfg = client
+        cfg.settings.otto_enabled = False
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+
+        # When an otherwise-valid event arrives
+        response = http.post(JIRA_URL, content=_jira_issue_payload(issue_id="10003"))
+
+        # Then Jira gets its ack but Otto stays silent
+        assert response.status_code == 200
+        assert handler.await_count == 0
 
 
 class TestHealthz:

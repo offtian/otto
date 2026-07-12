@@ -173,8 +173,15 @@ async def _conversation_input(
                 thread_ts=thread_ts,
                 limit=cfg.settings.thread_history_limit,
             )
-        case entities.TicketRef():
-            history = []  # ponytail: ticket comment history lands with the Jira gateway (Phase 1)
+        case entities.TicketRef(issue_key=issue_key):
+            history = (
+                await cfg.jira.fetch_conversation(
+                    issue_key=issue_key,
+                    limit=cfg.settings.thread_history_limit,
+                )
+                if cfg.jira is not None
+                else []
+            )
     if len(history) <= 1:
         return request.text
     transcript = "\n".join(f"{author}: {text}" for author, text in history)
@@ -286,6 +293,9 @@ async def _post_reply(
         case entities.SlackThread(channel_id=channel_id, thread_ts=thread_ts):
             await cfg.slack.post_message(channel=channel_id, text=text, thread_ts=thread_ts)
         case entities.TicketRef(issue_key=issue_key):
-            # ponytail: ticket replies land with the Jira gateway (Phase 1);
-            # until then the origin type exists so nothing Slack-shaped bakes in.
-            logs.log_event("ticket_reply_skipped", params={"issue_key": issue_key})
+            if cfg.jira is None:
+                # Unreachable while the webhook is the only ticket intake —
+                # it rejects events whenever the gateway is unconfigured.
+                logs.log_event("ticket_reply_skipped", params={"issue_key": issue_key})
+            else:
+                await cfg.jira.post_comment(issue_key=issue_key, text=text)

@@ -15,12 +15,14 @@ Layer rules (enforced by import-linter):
 import functools
 
 import attrs
+import httpx
 from agents import mcp as agents_mcp
 from agents.models import interface as model_interface
 from slack_sdk.web.async_client import AsyncWebClient
 
 from otto.domain.support import approvals
 from otto.settings import Settings, settings
+from otto.vendors import jira as jira_vendor
 from otto.vendors import llm, mcp
 from otto.vendors import slack as slack_vendor
 
@@ -34,6 +36,8 @@ class Configuration:
     settings: Settings
     slack: slack_vendor.SlackGateway
     triage: slack_vendor.SlackTriageBackend
+    # None = ticket channel disabled (no jira_base_url configured).
+    jira: jira_vendor.JiraGateway | None
     approvals: approvals.ApprovalStore
     model: model_interface.Model
     # MCP servers are optional: None = capability runs on its local stub
@@ -54,6 +58,17 @@ def get_config() -> Configuration:
         triage=slack_vendor.SlackTriageBackend(
             gateway=gateway,
             triage_channel=settings.slack_triage_channel,
+        ),
+        jira=(
+            jira_vendor.JiraGateway(
+                client=httpx.AsyncClient(
+                    base_url=settings.jira_base_url,
+                    auth=(settings.jira_user_email, settings.jira_api_token),
+                    timeout=10.0,
+                )
+            )
+            if settings.jira_base_url
+            else None
         ),
         approvals=approvals.InMemoryApprovalStore(),
         model=llm.build_model(

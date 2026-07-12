@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     slack_signing_secret: str = ""
     slack_triage_channel: str = ""
 
+    # Jira ticket channel (D9) — Jira Cloud REST + inbound webhook. An empty
+    # base URL disables the ticket channel (stub parity with the MCP fields).
+    jira_base_url: str = ""
+    jira_user_email: str = ""
+    jira_api_token: str = ""
+    jira_webhook_secret: str = ""
+
     # Kill switch (FR8): false = events are acked but Otto never replies.
     otto_enabled: bool = True
 
