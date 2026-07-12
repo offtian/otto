@@ -14,6 +14,7 @@ APPROVE_ACTION_ID = "otto_approval_approve"
 DENY_ACTION_ID = "otto_approval_deny"
 FEEDBACK_YES_ACTION_ID = "otto_feedback_yes"
 FEEDBACK_NO_ACTION_ID = "otto_feedback_no"
+RESOLVE_ACTION_ID = "otto_escalation_resolve"
 
 
 @attrs.frozen
@@ -86,6 +87,30 @@ class SlackGateway:
         Replace a message's content (used to close out approval cards).
         """
         await self.client.chat_update(channel=channel, ts=ts, text=text, blocks=[])
+
+    async def post_escalation(self, *, channel: str, text: str, resolve_value: str) -> str:
+        """
+        Post an escalation card carrying a "Mark resolved" button and return
+        its ``ts``. ``resolve_value`` (the origin ref) is echoed back on click
+        so a support agent's resolution can be attributed to the right request
+        (the D6 support-agent-marks-resolved signal).
+        """
+        blocks: list[dict[str, object]] = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Mark resolved"},
+                        "action_id": RESOLVE_ACTION_ID,
+                        "value": resolve_value,
+                    },
+                ],
+            },
+        ]
+        response = await self.client.chat_postMessage(channel=channel, text=text, blocks=blocks)
+        return str(response["ts"])
 
     async def fetch_thread(
         self,
@@ -189,5 +214,7 @@ class SlackTriageBackend:
             f"*Summary:* {summary}\n"
             f"*Origin:* {origin_ref}"
         )
-        ts = await self.gateway.post_message(channel=self.triage_channel, text=text)
+        ts = await self.gateway.post_escalation(
+            channel=self.triage_channel, text=text, resolve_value=origin_ref
+        )
         return f"triage#{ts}"

@@ -63,6 +63,14 @@ class _FeedbackClick:
     voter_id: str
 
 
+@attrs.frozen
+class _ResolveClick:
+    origin_ref: str
+    resolver_id: str
+    card_channel: str
+    card_ts: str
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
     cfg = config.get_config()
@@ -133,6 +141,10 @@ async def slack_interactions(
     feedback = _to_feedback_click(payload)
     if feedback is not None:
         background.add_task(_record_feedback_safely, feedback)
+        return fastapi.Response()
+    resolve = _to_resolve_click(payload)
+    if resolve is not None:
+        background.add_task(_mark_resolved_safely, resolve)
     return fastapi.Response()
 
 
@@ -348,6 +360,28 @@ def _to_feedback_click(payload: dict[str, object]) -> _FeedbackClick | None:
     )
 
 
+def _to_resolve_click(payload: dict[str, object]) -> _ResolveClick | None:
+    if payload.get("type") != "block_actions":
+        return None
+    actions = payload.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return None
+    action = actions[0]
+    if action.get("action_id") != slack_vendor.RESOLVE_ACTION_ID:
+        return None
+    user = payload.get("user")
+    if not isinstance(user, dict):
+        return None
+    channel = payload.get("channel")
+    message = payload.get("message")
+    return _ResolveClick(
+        origin_ref=str(action.get("value", "")),
+        resolver_id=str(user.get("id", "")),
+        card_channel=str(channel.get("id", "")) if isinstance(channel, dict) else "",
+        card_ts=str(message.get("ts", "")) if isinstance(message, dict) else "",
+    )
+
+
 async def _handle_safely(request: entities.SupportRequest) -> None:
     """
     FR8 wrapper: a crashed handler still yields an origin-visible apology
@@ -383,3 +417,15 @@ async def _record_feedback_safely(click: _FeedbackClick) -> None:
         )
     except Exception as exc:
         logs.log_exception(exc, params={"feedback_channel": click.channel})
+
+
+async def _mark_resolved_safely(click: _ResolveClick) -> None:
+    try:
+        await support.mark_resolved(
+            origin_ref=click.origin_ref,
+            resolver_id=click.resolver_id,
+            card_channel=click.card_channel,
+            card_ts=click.card_ts,
+        )
+    except Exception as exc:
+        logs.log_exception(exc, params={"origin_ref": click.origin_ref})

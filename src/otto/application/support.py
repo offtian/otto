@@ -170,6 +170,42 @@ async def record_feedback(*, helpful: bool, origin: entities.Origin, voter_id: s
     )
 
 
+async def mark_resolved(
+    *, origin_ref: str, resolver_id: str, card_channel: str, card_ts: str
+) -> None:
+    """
+    Apply a support agent's "Mark resolved" click on an escalation card — the
+    D6 support-agent-marks-resolved signal. Role-gated to support/admin (D3);
+    an unauthorized click changes nothing and gets a polite note under the card.
+
+    :param origin_ref: the escalated request's origin reference (button value).
+    :param resolver_id: Slack user id of whoever clicked.
+    :param card_channel: channel of the escalation card (to update / reply).
+    :param card_ts: ts of the escalation card.
+    """
+    cfg = config.get_config()
+    if resolver_id not in cfg.settings.approver_ids:
+        logs.log_event(
+            "resolve_click_unauthorized",
+            params={"resolver_id": resolver_id, "origin_ref": origin_ref},
+        )
+        await cfg.slack.post_message(
+            channel=card_channel,
+            thread_ts=card_ts,
+            text=f"Sorry <@{resolver_id}> — only support/admin roles may mark escalations resolved.",
+        )
+        return
+    logs.log_event(
+        "request_resolved",
+        params={"signal": "agent_marked", "origin_ref": origin_ref, "resolver_id": resolver_id},
+    )
+    await cfg.slack.update_message(
+        channel=card_channel,
+        ts=card_ts,
+        text=f":white_check_mark: Escalation resolved by <@{resolver_id}>.",
+    )
+
+
 def _build_agent(cfg: config.Configuration) -> agents.Agent[support_agent.SupportContext]:
     return support_agent.build_agent(
         model=cfg.model,

@@ -271,6 +271,32 @@ class TestSlackInteractions:
             voter_id="U_SUPPORT",
         )
 
+    def test_dispatches_an_escalation_resolve_click(self, client, monkeypatch):
+        # Given a resolve spy and a click carrying the escalation card coordinates
+        http, _ = client
+        resolver = mock.AsyncMock()
+        monkeypatch.setattr(support, "mark_resolved", resolver)
+        payload = {
+            "type": "block_actions",
+            "user": {"id": "U_SUPPORT"},
+            "channel": {"id": "C_TRIAGE"},
+            "message": {"ts": "300.1"},
+            "actions": [{"action_id": "otto_escalation_resolve", "value": "IT-7"}],
+        }
+        body = urllib.parse.urlencode({"payload": json.dumps(payload)}).encode()
+
+        # When the click arrives
+        response = self._post_interaction(http, body)
+
+        # Then it reaches the application layer with the origin and card coordinates
+        assert response.status_code == 200
+        resolver.assert_awaited_once_with(
+            origin_ref="IT-7",
+            resolver_id="U_SUPPORT",
+            card_channel="C_TRIAGE",
+            card_ts="300.1",
+        )
+
 
 def _jira_issue_payload(issue_id: str = "10001") -> bytes:
     return json.dumps(

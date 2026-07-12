@@ -83,6 +83,7 @@ class FakeSlackGateway:
     def __init__(self):
         self.messages = []  # (channel, thread_ts, text)
         self.answers = []  # (channel, thread_ts, text, feedback_value)
+        self.escalations = []  # (channel, text, resolve_value)
         self.cards = []
         self.updates = []
 
@@ -93,6 +94,10 @@ class FakeSlackGateway:
     async def post_answer(self, *, channel, text, thread_ts, feedback_value):
         self.answers.append((channel, thread_ts, text, feedback_value))
         return "100.2"
+
+    async def post_escalation(self, *, channel, text, resolve_value):
+        self.escalations.append((channel, text, resolve_value))
+        return "300.1"
 
     async def update_message(self, *, channel, ts, text):
         self.updates.append((channel, ts, text))
@@ -419,10 +424,61 @@ class TestKnowledgeAnswerFeedback:
 
         # Then it is escalated to the triage channel — the path forward on a miss
         assert any(
-            channel == "C_TRIAGE" and "Escalation" in text for channel, _, text in gateway.messages
+            channel == "C_TRIAGE" and "Escalation" in text
+            for channel, text, _ in gateway.escalations
         )
         # Then the requester is told a human will follow up, at their origin
         assert any(channel == "D1" and "human" in text for channel, _, text in gateway.messages)
+
+
+class TestSupportMarksResolved:
+    async def test_escalation_card_carries_a_resolve_button(self, wire):
+        # Given an escalation posted to the triage channel
+        _cfg, gateway, _ = wire(ScriptedModel([]))
+        await support.record_feedback(helpful=False, origin=ORIGIN, voter_id="U_REQ")
+
+        # Then the card offers a "Mark resolved" action carrying the origin ref
+        channel, _text, resolve_value = gateway.escalations[0]
+        assert channel == "C_TRIAGE"
+        assert "D1" in resolve_value
+
+    async def test_authorized_resolve_records_the_signal_and_closes_the_card(
+        self, wire, monkeypatch
+    ):
+        # Given a resolution-log spy
+        _cfg, gateway, _ = wire(ScriptedModel([]))
+        events = mock.Mock(wraps=support.logs.log_event)
+        monkeypatch.setattr(support.logs, "log_event", events)
+
+        # When a support agent marks an escalation resolved
+        await support.mark_resolved(
+            origin_ref="IT-7", resolver_id="U_SUPPORT", card_channel="C_TRIAGE", card_ts="300.1"
+        )
+
+        # Then the agent-marked resolution signal is recorded and the card closed out
+        assert any(
+            call.args[0] == "request_resolved"
+            and call.kwargs["params"]["signal"] == "agent_marked"
+            for call in events.call_args_list
+        )
+        assert gateway.updates[-1][0] == "C_TRIAGE"
+        assert "resolved by <@u_support>" in gateway.updates[-1][2].lower()
+
+    async def test_unauthorized_resolve_changes_nothing(self, wire):
+        # Given a user with no approver role
+        _cfg, gateway, _ = wire(ScriptedModel([]))
+
+        # When they click "Mark resolved"
+        await support.mark_resolved(
+            origin_ref="IT-7", resolver_id="U_RANDO", card_channel="C_TRIAGE", card_ts="300.1"
+        )
+
+        # Then the card is untouched and they get a polite note under it
+        assert gateway.updates == []
+        assert any(
+            thread_ts == "300.1" and "only support/admin" in text
+            for _, thread_ts, text in gateway.messages
+        )
 
 
 SAM = users.User(
