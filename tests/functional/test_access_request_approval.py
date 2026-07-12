@@ -477,3 +477,27 @@ class TestRequesterIdentity:
         # Then the agent sees name + team, not a bare channel id
         first_input = json.dumps(model.inputs[0], default=str)
         assert "Dana Data (team: Data Platform)" in first_input
+
+
+class TestLogContentBoundary:
+    async def test_info_logs_never_carry_the_message_text(self, wire, monkeypatch):
+        # Given a captured logger and a request whose text is a sensitive sentinel (NFR2)
+        _cfg, _gateway, _ = wire(ScriptedModel([[_text("Here is the answer.")]]))
+        captured = mock.Mock()
+        monkeypatch.setattr(support.logs, "_logger", captured)
+        sentinel = "SENSITIVE-VPN-PASSPHRASE-8675309"
+
+        # When a request carrying that text is handled end-to-end
+        await support.handle_support_request(
+            request=entities.SupportRequest(
+                id="Ev-nfr2", user_id="U_REQ", text=sentinel, origin=ORIGIN
+            )
+        )
+
+        # Then something was logged, but the sentinel appears in no INFO event
+        logged = json.dumps(
+            [{"args": call.args, "kwargs": call.kwargs} for call in captured.info.call_args_list],
+            default=str,
+        )
+        assert captured.info.call_count > 0
+        assert sentinel not in logged
