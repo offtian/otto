@@ -97,6 +97,17 @@ class ApprovalStore(Protocol):
         """
         ...
 
+    async def find_pending(
+        self, *, origin: entities.Origin, tool_name: str
+    ) -> PendingApproval | None:
+        """
+        Return a still-pending approval for this origin and tool, or None.
+        Used to suppress a duplicate card when a re-triggered event on the
+        same conversation asks for the same gated action again while its
+        earlier run is already awaiting a human OK.
+        """
+        ...
+
     async def expire_pending(self, *, cutoff: datetime) -> list[PendingApproval]:
         """
         Transition every approval still pending since before ``cutoff`` to
@@ -175,6 +186,18 @@ class InMemoryApprovalStore:
         )
         self._approvals[approval_id] = resolved
         return resolved
+
+    async def find_pending(
+        self, *, origin: entities.Origin, tool_name: str
+    ) -> PendingApproval | None:
+        for approval in self._approvals.values():
+            if (
+                approval.status is ApprovalStatus.PENDING
+                and approval.origin == origin
+                and approval.tool_name == tool_name
+            ):
+                return approval
+        return None
 
     async def expire_pending(self, *, cutoff: datetime) -> list[PendingApproval]:
         now = datetime.now(tz=UTC)
@@ -292,6 +315,23 @@ class PostgresApprovalStore:
         if exists is None:
             raise ApprovalNotFound(f"no approval with id {approval_id!r}")
         raise ApprovalAlreadyResolved(f"approval {approval_id!r} is already resolved")
+
+    async def find_pending(
+        self, *, origin: entities.Origin, tool_name: str
+    ) -> PendingApproval | None:
+        table = _TABLE
+        # origin_to_json emits fixed key order, so equality on the stored TEXT
+        # is exact for both origin kinds.
+        row = await self.database.fetch_one(
+            sa.select(table).where(
+                sa.and_(
+                    table.c.status == ApprovalStatus.PENDING.value,
+                    table.c.origin == entities.origin_to_json(origin),
+                    table.c.tool_name == tool_name,
+                )
+            )
+        )
+        return None if row is None else _from_row(row)
 
     async def expire_pending(self, *, cutoff: datetime) -> list[PendingApproval]:
         table = _TABLE

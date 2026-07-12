@@ -141,17 +141,22 @@ class SlackGateway:
         approval_id: str,
         requester: str,
         tool_name: str,
-        tool_arguments: str,
+        summary: str,
     ) -> str:
         """
-        Post a Block Kit approve/deny card for a paused agent run and
-        return its ``ts``. ``requester`` is pre-rendered mrkdwn (mention
-        and/or name + team) — identity resolution is the caller's job.
+        Post a Block Kit approve/deny card for a paused agent run and return
+        its ``ts``. The decision is whether to let Otto *automate and file*
+        the request on the requester's behalf — not whether to grant the
+        access, which the target system's own approval chain still decides.
+        ``requester`` and ``summary`` are pre-rendered mrkdwn (identity
+        resolution and argument formatting are the caller's job).
         """
         header = (
-            f":lock: *Approval needed* — a sensitive action is waiting on sign-off.\n"
-            f"*Requester:* {requester}\n*Tool:* `{tool_name}`\n*Arguments:*\n"
-            f"```{tool_arguments}```"
+            f":lock: *Approve automating this?* Otto is ready to submit a "
+            f"sensitive request on behalf of {requester} and needs a human OK "
+            f"to file it. This authorizes the submission, not the access "
+            f"itself — the target system runs its own approval.\n\n"
+            f"{summary}\n\n_Tool:_ `{tool_name}`"
         )
         blocks: list[dict[str, object]] = [
             {"type": "section", "text": {"type": "mrkdwn", "text": header}},
@@ -177,7 +182,7 @@ class SlackGateway:
         ]
         response = await self.client.chat_postMessage(
             channel=channel,
-            text=f"Approval needed: {tool_name}",
+            text=f"Approve automating {tool_name} on the requester's behalf?",
             blocks=blocks,
         )
         return str(response["ts"])

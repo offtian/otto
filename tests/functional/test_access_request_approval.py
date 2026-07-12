@@ -103,15 +103,14 @@ class FakeSlackGateway:
     async def update_message(self, *, channel, ts, text):
         self.updates.append((channel, ts, text))
 
-    async def post_approval_card(
-        self, *, channel, approval_id, requester, tool_name, tool_arguments
-    ):
+    async def post_approval_card(self, *, channel, approval_id, requester, tool_name, summary):
         self.cards.append(
             {
                 "channel": channel,
                 "approval_id": approval_id,
                 "requester": requester,
                 "tool_name": tool_name,
+                "summary": summary,
             }
         )
         return "200.1"
@@ -194,11 +193,38 @@ class TestAccessRequestApproval:
         # Then a card lands in the triage channel and the user is told to wait
         assert gateway.cards[0]["channel"] == "C_TRIAGE"
         assert gateway.cards[0]["tool_name"] == "submit_access_request"
-        assert any("human sign-off" in text for _, _, text in gateway.messages)
+        assert any("file it on your behalf" in text for _, _, text in gateway.messages)
         # Then the stored approval carries the serialized run state (NFR6)
         pending = await cfg.approvals.get(gateway.cards[0]["approval_id"])
         assert pending.status is approvals.ApprovalStatus.PENDING
         assert pending.run_state_json
+
+    async def test_the_card_shows_the_business_justification_not_raw_json(self, wire):
+        # Given a model that asks for access with a stated justification
+        _cfg, gateway, _ = wire(ScriptedModel([[_access_tool_call()]]))
+
+        # When the request pauses for approval
+        await _submit_request()
+
+        # Then the approver sees the justification the agent collected, framed
+        # for a human — the automation decision, not raw arguments
+        summary = gateway.cards[0]["summary"]
+        assert "Business justification" in summary
+        assert "quarterly" in summary
+
+    async def test_a_repeat_request_during_the_gap_posts_no_second_card(self, wire):
+        # Given a first access request already paused and awaiting approval
+        model = ScriptedModel([[_access_tool_call()], [_access_tool_call()]])
+        _cfg, gateway, _ = wire(model)
+        await _submit_request()
+
+        # When the same conversation reaches the same gated tool again
+        await _submit_request()
+
+        # Then no duplicate card is posted and the requester is told it's
+        # already waiting — the earlier paused run is the one that resolves
+        assert len(gateway.cards) == 1
+        assert any("already waiting" in text for _, _, text in gateway.messages)
 
     async def test_approval_executes_the_tool_and_reports_at_the_origin(self, wire):
         # Given a paused access request
@@ -335,7 +361,9 @@ class TestAccessRequestApprovalFromTicket:
         assert gateway.cards[0]["channel"] == "C_TRIAGE"
 
         # Then the requester is told to wait on their ticket, not in Slack
-        assert any("human sign-off" in text for key, text in jira.comments if key == "IT-7")
+        assert any(
+            "file it on your behalf" in text for key, text in jira.comments if key == "IT-7"
+        )
 
     async def test_approval_outcome_is_delivered_as_a_ticket_comment(self, wire):
         # Given a paused access request that originated from a ticket

@@ -3,6 +3,7 @@ Support use-cases: handle one inbound request end-to-end, and apply a human
 approve/deny decision to a paused run (FR1-FR8).
 """
 
+import json
 import pathlib
 import uuid
 from datetime import datetime, timedelta
@@ -374,13 +375,37 @@ async def _pause_for_approval(
     # ponytail: one card covers the whole run — resolving it applies the same
     # decision to every interruption; per-tool cards if mixed runs show up.
     interruption = result.interruptions[0]
+    tool_name = interruption.tool_name or "unknown"
+
+    # A re-triggered event on the same conversation (e.g. the requester nudges
+    # the ticket during the approval gap) reruns the agent and can reach the
+    # same gated tool again. Suppress the duplicate card — the earlier run is
+    # already waiting, and resolving it delivers the outcome here.
+    # ponytail: dedupe on origin+tool catches the human-paced re-trigger; a
+    # sub-second double-fire could still race past it at single-replica. Add a
+    # partial unique index (status='pending') if multi-replica makes that real.
+    if await cfg.approvals.find_pending(origin=request.origin, tool_name=tool_name) is not None:
+        logs.log_event(
+            "approval_duplicate_suppressed",
+            params={"request_id": request.id, "tool_name": tool_name},
+        )
+        await _post_reply(
+            origin=request.origin,
+            text=(
+                "I'm already waiting on a human OK to file this for you — no "
+                "need to ask again; I'll follow up here once it's approved."
+            ),
+            cfg=cfg,
+        )
+        return
+
     approval = approvals.PendingApproval(
         id=str(uuid.uuid4()),
         request_id=request.id,
         requester_id=request.user_id,
         origin=request.origin,
         request_text=request.text,
-        tool_name=interruption.tool_name or "unknown",
+        tool_name=tool_name,
         tool_arguments=_tool_arguments(interruption),
         run_state_json=result.to_state().to_string(),
     )
@@ -392,7 +417,7 @@ async def _pause_for_approval(
         approval_id=approval.id,
         requester=requester,
         tool_name=approval.tool_name,
-        tool_arguments=approval.tool_arguments,
+        summary=_approval_summary(tool_arguments=approval.tool_arguments),
     )
     await cfg.approvals.save(
         attrs.evolve(
@@ -404,8 +429,8 @@ async def _pause_for_approval(
     await _post_reply(
         origin=request.origin,
         text=(
-            "That action needs a human sign-off — I've asked the support team "
-            "to approve it and will follow up here with the outcome."
+            "This needs a human OK before I file it on your behalf — I've "
+            "asked the support team and will follow up here with the outcome."
         ),
         cfg=cfg,
     )
@@ -477,6 +502,27 @@ def _tool_arguments(interruption: agents.ToolApprovalItem) -> str:
     if isinstance(raw, dict):
         return str(raw.get("arguments", ""))
     return str(getattr(raw, "arguments", ""))
+
+
+def _approval_summary(*, tool_arguments: str) -> str:
+    """
+    Render a paused tool's arguments as readable mrkdwn for the approver — the
+    target and business justification of an access request, not raw JSON — so
+    they can judge whether to let Otto file it on the requester's behalf. Falls
+    back to the raw arguments for tools whose args aren't the access shape.
+    """
+    try:
+        args = json.loads(tool_arguments)
+    except (json.JSONDecodeError, TypeError):
+        args = None
+    if not isinstance(args, dict):
+        return f"```{tool_arguments}```" if tool_arguments else "_no details provided_"
+    labels = {
+        "system": "System",
+        "entitlement": "Entitlement",
+        "justification": "Business justification",
+    }
+    return "\n".join(f"*{labels.get(key, key)}:* {value}" for key, value in args.items())
 
 
 async def _post_answer(

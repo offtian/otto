@@ -139,6 +139,43 @@ class TestPostgresApprovalStore:
         assert (await store.get("ap-1")).status is approvals.ApprovalStatus.APPROVED
 
 
+class TestPostgresApprovalStoreFindPending:
+    async def test_finds_a_pending_approval_by_origin_and_tool(self, store):
+        # Given a stored pending approval on a Slack origin
+        origin = entities.SlackThread(channel_id="C1", thread_ts="1.0")
+        await store.save(_pending(origin=origin))
+
+        # When a matching origin and tool are looked up
+        found = await store.find_pending(origin=origin, tool_name="request_access")
+
+        # Then that pending approval is returned
+        assert found is not None
+        assert found.id == "ap-1"
+
+    async def test_returns_none_when_the_tool_differs(self, store):
+        # Given a pending approval for one tool
+        origin = entities.SlackThread(channel_id="C1", thread_ts="1.0")
+        await store.save(_pending(origin=origin))
+
+        # When a different tool on the same origin is looked up
+        found = await store.find_pending(origin=origin, tool_name="submit_access_request")
+
+        # Then nothing matches — the tool differs
+        assert found is None
+
+    async def test_ignores_a_resolved_approval(self, store):
+        # Given an approval that has been resolved
+        origin = entities.SlackThread(channel_id="C1", thread_ts="1.0")
+        await store.save(_pending(origin=origin))
+        await store.resolve("ap-1", approvals.ApprovalStatus.APPROVED, resolver_id="U_SUPPORT")
+
+        # When its origin and tool are looked up
+        found = await store.find_pending(origin=origin, tool_name="request_access")
+
+        # Then it is not returned — only a still-pending run suppresses a duplicate
+        assert found is None
+
+
 class TestPostgresApprovalStoreSweep:
     async def test_expire_pending_marks_stale_approvals_terminal(self, store):
         # Given a stored pending approval
