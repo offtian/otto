@@ -19,10 +19,60 @@ class Settings(BaseSettings):
 
     debug: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    environment: str = "dev"
 
     # SQLAlchemy-flavoured URL; the databases lib gets the libpq form via
     # data/_dsn.py. Empty string = no database configured.
     database_url: str = "postgresql+asyncpg://localhost:5432/otto"
+
+    # LLM gateway (any OpenAI-compatible endpoint: LiteLLM, firm proxy, or
+    # api.openai.com when base_url is empty).
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = "gpt-5.1"
+
+    # Slack app credentials + the channel where humans triage escalations
+    # and approve sensitive actions.
+    slack_bot_token: str = ""
+    slack_signing_secret: str = ""
+    slack_triage_channel: str = ""
+
+    # Kill switch (FR8): false = events are acked but Otto never replies.
+    otto_enabled: bool = True
+
+    # Approver allowlists (D3) — comma-separated Slack user ids. A Postgres
+    # roles table replaces these in Phase 2.
+    support_user_ids: str = ""
+    admin_user_ids: str = ""
+
+    # Max messages of conversation history rebuilt per event (D2).
+    thread_history_limit: int = 30
+
+    # Telemetry. Either, both, or neither sink may be enabled: Logfire when
+    # a token is set, any OTLP collector when an endpoint is set.
+    otel_service_name: str = "otto"
+    otlp_endpoint: str = ""  # e.g. http://localhost:4318
+    logfire_token: str = ""
+
+    # MCP integrations (Streamable HTTP). An empty URL means the capability
+    # runs on its local stub tool so the agent still works end-to-end in dev.
+    confluence_mcp_url: str = ""
+    confluence_mcp_token: str = ""
+    sailpoint_mcp_url: str = ""
+    sailpoint_mcp_token: str = ""
+
+    # Directory of markdown runbooks the agent can walk users through.
+    # Relative paths resolve against the process cwd (repo root for
+    # `just run` and the compose app container alike).
+    runbooks_dir: str = "runbooks"
+
+    @property
+    def approver_ids(self) -> frozenset[str]:
+        """
+        Return the union of support and admin user ids (D3).
+        """
+        raw = f"{self.support_user_ids},{self.admin_user_ids}"
+        return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
 # Module-level singleton — the sanctioned direct-object import (the one
