@@ -102,6 +102,12 @@ class _FakeSlack:
     async def update_message(self, **kwargs):
         return None
 
+    async def set_status(self, **kwargs):
+        return None
+
+    async def set_suggested_prompts(self, **kwargs):
+        return None
+
     async def post_approval_card(self, **kwargs):
         return "2.0"
 

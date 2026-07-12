@@ -87,10 +87,18 @@ class FakeSlackGateway:
         self.escalations = []  # (channel, text, resolve_value)
         self.cards = []
         self.updates = []
+        self.statuses = []  # (channel, thread_ts, status)
+        self.prompts = []  # (channel, thread_ts, title, prompts)
 
     async def post_message(self, *, channel, text, thread_ts=None):
         self.messages.append((channel, thread_ts, text))
         return "100.1"
+
+    async def set_status(self, *, channel, thread_ts, status):
+        self.statuses.append((channel, thread_ts, status))
+
+    async def set_suggested_prompts(self, *, channel, thread_ts, title, prompts):
+        self.prompts.append((channel, thread_ts, title, prompts))
 
     async def post_answer(self, *, channel, text, thread_ts, feedback_value):
         self.answers.append((channel, thread_ts, text, feedback_value))
@@ -626,3 +634,39 @@ class TestApprovalSweep:
         )
         assert gateway.updates == []
         assert (await cfg.approvals.get(approval_id)).status is approvals.ApprovalStatus.PENDING
+
+
+class TestAssistantMode:
+    async def test_greeting_welcomes_and_offers_suggested_prompts(self, wire):
+        # Given a wired config and a user opening Otto's assistant pane (3.5)
+        _cfg, gateway, _ = wire(ScriptedModel([]))
+
+        # When the assistant thread is greeted
+        await support.greet_assistant_thread(channel="D1", thread_ts="1.0")
+
+        # Then Otto welcomes them in the thread and offers starter prompts
+        assert any(channel == "D1" and "Otto" in text for channel, _, text in gateway.messages)
+        assert gateway.prompts
+        assert gateway.prompts[0][0] == "D1"
+
+    async def test_a_slack_request_shows_the_thinking_status(self, wire):
+        # Given a wired config answering a Slack (DM) request
+        _cfg, gateway, _ = wire(ScriptedModel([[_text("Restart the VPN client.")]]))
+
+        # When the request is handled
+        await _submit_request()
+
+        # Then Otto shows the assistant "is working" cue on the thread
+        assert gateway.statuses
+        assert gateway.statuses[0][0] == "D1"
+
+    async def test_a_ticket_request_sets_no_slack_status(self, wire):
+        # Given a Jira-origin request — there is no assistant thread to update
+        jira = FakeJiraGateway()
+        _cfg, gateway, _ = wire(ScriptedModel([[_text("Restart the VPN client.")]]), jira=jira)
+
+        # When it is handled
+        await _submit_request(origin=TICKET_ORIGIN)
+
+        # Then no assistant status is set — the cue is Slack-assistant-only
+        assert gateway.statuses == []

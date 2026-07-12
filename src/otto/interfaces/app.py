@@ -10,7 +10,7 @@ import asyncio
 import collections
 import contextlib
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import fastapi
 
@@ -18,6 +18,7 @@ from otto import config
 from otto.application import support
 from otto.data import db as data_db
 from otto.interfaces.routers import base, jira, slack
+from otto.settings import settings
 from otto.utils import logs, telemetry
 
 
@@ -61,6 +62,34 @@ class _RecentIds:
         return False
 
 
+class _RateLimiter:
+    """
+    Per-user fixed-window rate limit (agent-mode spend/abuse guard, 3.5).
+    ``allow`` records the hit and returns whether the user is under the cap.
+    """
+
+    # ponytail: in-process only — move to Redis with the dedup set at replicas > 1.
+
+    def __init__(self, *, per_minute: int) -> None:
+        self._per_minute = per_minute
+        self._hits: dict[str, list[datetime]] = {}
+
+    def allow(self, user_id: str, *, now: datetime) -> bool:
+        """
+        Return whether ``user_id`` is under the per-minute cap, counting this
+        request. A cap of 0 disables the limit (always allowed).
+        """
+        if self._per_minute <= 0:
+            return True
+        window_start = now - timedelta(seconds=60)
+        hits = [hit for hit in self._hits.get(user_id, []) if hit >= window_start]
+        allowed = len(hits) < self._per_minute
+        if allowed:
+            hits.append(now)
+        self._hits[user_id] = hits
+        return allowed
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
     cfg = config.get_config()
@@ -98,6 +127,7 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
 
 app = fastapi.FastAPI(title="otto", lifespan=_lifespan)
 app.state.recent_events = _RecentIds()
+app.state.rate_limiter = _RateLimiter(per_minute=settings.slack_user_rate_limit_per_minute)
 # Otto's own Jira account id, fetched lazily on the first webhook (FR9
 # own-actor loop guard). None = not yet established.
 app.state.jira_bot_account_id = None

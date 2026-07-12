@@ -38,6 +38,12 @@ class ResolveClick:
     card_ts: str
 
 
+@attrs.frozen
+class AssistantGreeting:
+    channel: str
+    thread_ts: str
+
+
 async def handle_safely(request: entities.SupportRequest) -> None:
     """
     Run the support handler; on failure, log and post an origin-visible
@@ -83,3 +89,12 @@ async def mark_resolved_safely(click: ResolveClick) -> None:
         )
     except Exception as exc:
         logs.log_exception(exc, params={"origin_ref": click.origin_ref})
+
+
+async def greet_safely(greeting: AssistantGreeting) -> None:
+    try:
+        await support.greet_assistant_thread(
+            channel=greeting.channel, thread_ts=greeting.thread_ts
+        )
+    except Exception as exc:
+        logs.log_exception(exc, params={"assistant_thread": greeting.thread_ts})

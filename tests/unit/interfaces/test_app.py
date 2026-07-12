@@ -1,6 +1,7 @@
 import json
 import time
 import urllib.parse
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 import pytest
@@ -64,6 +65,9 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(config, "get_config", lambda: cfg)
     otto_app.app.state.recent_events = otto_app._RecentIds()
+    otto_app.app.state.rate_limiter = otto_app._RateLimiter(
+        per_minute=settings.slack_user_rate_limit_per_minute
+    )
     otto_app.app.state.jira_bot_account_id = None
     return testclient.TestClient(otto_app.app), cfg
 
@@ -178,6 +182,51 @@ class TestSlackEvents:
         # Then the user still gets an origin-visible apology
         assert response.status_code == 200
         assert apology.await_count == 1
+
+    def test_greets_a_new_assistant_thread(self, client, monkeypatch):
+        # Given a greeting spy and an assistant_thread_started event (agent-mode)
+        http, _ = client
+        greet = mock.AsyncMock()
+        monkeypatch.setattr(support, "greet_assistant_thread", greet)
+        body = json.dumps(
+            {
+                "type": "event_callback",
+                "event_id": "Ev-assist",
+                "event": {
+                    "type": "assistant_thread_started",
+                    "assistant_thread": {"channel_id": "D1", "thread_ts": "1.0"},
+                },
+            }
+        ).encode()
+
+        # When the event arrives
+        response = http.post("/slack/events", content=body, headers=_signed_headers(body))
+
+        # Then Otto greets that thread (welcome + suggested prompts)
+        assert response.status_code == 200
+        greet.assert_awaited_once_with(channel="D1", thread_ts="1.0")
+
+    def test_rate_limited_user_is_dropped(self, client, monkeypatch):
+        # Given a handler spy and a cap of one request per minute
+        http, _ = client
+        otto_app.app.state.rate_limiter = otto_app._RateLimiter(per_minute=1)
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+
+        # When the same user sends two distinct requests inside the window
+        http.post(
+            "/slack/events",
+            content=_event_payload(event_id="Ev-r1"),
+            headers=_signed_headers(_event_payload(event_id="Ev-r1")),
+        )
+        http.post(
+            "/slack/events",
+            content=_event_payload(event_id="Ev-r2"),
+            headers=_signed_headers(_event_payload(event_id="Ev-r2")),
+        )
+
+        # Then only the first is handled — the second is acked and dropped
+        assert handler.await_count == 1
 
 
 class TestSlackInteractions:
@@ -527,3 +576,43 @@ class TestHealthz:
         # Then it reports ok
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
+
+
+class TestRateLimiter:
+    _NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    def test_allows_up_to_the_cap_then_blocks_within_the_window(self):
+        # Given a limiter capped at two requests per minute
+        limiter = otto_app._RateLimiter(per_minute=2)
+
+        # When one user makes three requests inside the same minute
+        verdicts = [limiter.allow("U", now=self._NOW) for _ in range(3)]
+
+        # Then the third is blocked — the first two are under the cap
+        assert verdicts == [True, True, False]
+
+    def test_forgets_hits_older_than_a_minute(self):
+        # Given a limiter at one per minute whose window is already used up
+        limiter = otto_app._RateLimiter(per_minute=1)
+        assert limiter.allow("U", now=self._NOW) is True
+
+        # When the next request comes just over a minute later
+        # Then the window has rolled and the user is allowed again
+        assert limiter.allow("U", now=self._NOW + timedelta(seconds=61)) is True
+
+    def test_a_zero_cap_disables_the_limit(self):
+        # Given a limiter with the cap disabled
+        limiter = otto_app._RateLimiter(per_minute=0)
+
+        # When a user makes many requests
+        # Then all are allowed
+        assert all(limiter.allow("U", now=self._NOW) for _ in range(100))
+
+    def test_limits_are_counted_per_user(self):
+        # Given a limiter at one per minute and one user already at the cap
+        limiter = otto_app._RateLimiter(per_minute=1)
+        assert limiter.allow("U_one", now=self._NOW) is True
+
+        # When a different user makes their first request
+        # Then it is allowed — the cap is per user
+        assert limiter.allow("U_two", now=self._NOW) is True

@@ -27,6 +27,7 @@ async def handle_support_request(*, request: entities.SupportRequest) -> None:
     :param request: the normalized inbound request, any channel.
     """
     cfg = config.get_config()
+    await _begin_thinking(origin=request.origin, cfg=cfg)
     result = await agents.Runner.run(
         _build_agent(cfg),
         await _conversation_input(request=request, cfg=cfg),
@@ -134,6 +135,42 @@ async def notify_failure(*, request: entities.SupportRequest) -> None:
             "The support team has been alerted; please try again in a bit."
         ),
         cfg=cfg,
+    )
+
+
+# Agent-mode starter prompts (3.5) — (button label, message sent on tap). These
+# are content, like the runbooks, so they live in code, not settings.
+_SUGGESTED_PROMPTS = (
+    ("Reset my password", "How do I reset my password?"),
+    ("Set up the VPN", "Walk me through setting up the VPN"),
+    ("Request system access", "I need access to a system for my work"),
+)
+
+
+async def greet_assistant_thread(*, channel: str, thread_ts: str) -> None:
+    """
+    Greet a newly opened assistant thread and offer starter prompts — the
+    agent-mode entry experience (3.5). Cards for sensitive actions still go to
+    the triage channel; this is only the requester-facing welcome.
+
+    :param channel: the assistant thread's channel id.
+    :param thread_ts: the assistant thread's root ts.
+    """
+    cfg = config.get_config()
+    await cfg.slack.post_message(
+        channel=channel,
+        thread_ts=thread_ts,
+        text=(
+            "Hi — I'm Otto, your tech-support assistant. Ask me a how-to "
+            "question, walk through a runbook, or request access to a system. "
+            "I cite my sources, and anything sensitive goes to a human first."
+        ),
+    )
+    await cfg.slack.set_suggested_prompts(
+        channel=channel,
+        thread_ts=thread_ts,
+        title="Try one of these",
+        prompts=list(_SUGGESTED_PROMPTS),
     )
 
 
@@ -558,6 +595,26 @@ def _feedback_value(origin: entities.SlackThread) -> str:
     split back into its channel and thread ts.
     """
     return f"{origin.channel_id}:{origin.thread_ts}"
+
+
+async def _begin_thinking(*, origin: entities.Origin, cfg: config.Configuration) -> None:
+    """
+    Show the assistant "is working" cue while Otto processes a Slack request
+    (agent-mode, 3.5). Assistant threads are DMs (channel ids start with "D");
+    channel mentions have no such indicator and are skipped. Best-effort — the
+    status is pure UX, so a failure must never block the actual reply. Posting
+    the answer later clears the indicator, so no explicit clear is needed.
+    """
+    if not isinstance(origin, entities.SlackThread) or not origin.channel_id.startswith("D"):
+        return
+    try:
+        await cfg.slack.set_status(
+            channel=origin.channel_id,
+            thread_ts=origin.thread_ts,
+            status="Otto is looking into this…",
+        )
+    except Exception as exc:
+        logs.log_exception(exc, params={"status": "set_thinking"})
 
 
 async def _post_reply(

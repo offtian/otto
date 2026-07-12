@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # Max messages of conversation history rebuilt per event (D2).
     thread_history_limit: int = 30
 
+    # Per-user Slack request cap per rolling minute (3.5 runaway-spend/abuse
+    # guard). 0 disables. In-process (single replica) — Redis before replicas > 1.
+    slack_user_rate_limit_per_minute: int = 15
+
     # Approval maintenance sweep (2.5). The sweep expires stale pending
     # approvals, nudges the triage channel about the rest, and purges resolved
     # run state past its retention window. Interval 0 disables the sweep.

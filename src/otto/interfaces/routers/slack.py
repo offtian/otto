@@ -9,6 +9,7 @@ domain mapping live in ``interfaces.schemas`` — no business logic here.
 import json
 import urllib.parse
 from collections.abc import Mapping
+from datetime import UTC, datetime
 
 import fastapi
 from slack_sdk.signature import SignatureVerifier
@@ -16,6 +17,7 @@ from slack_sdk.signature import SignatureVerifier
 from otto import config
 from otto.application import dispatch
 from otto.interfaces import schemas
+from otto.utils import logs
 
 
 router = fastapi.APIRouter()
@@ -38,8 +40,17 @@ async def slack_events(
         return fastapi.responses.JSONResponse({"challenge": envelope.challenge})
     if request.app.state.recent_events.seen(envelope.event_id):
         return fastapi.Response()
+    if not cfg.settings.otto_enabled:
+        return fastapi.Response()
+    greeting = envelope.to_assistant_greeting()
+    if greeting is not None:
+        background.add_task(dispatch.greet_safely, greeting)
+        return fastapi.Response()
     support_request = envelope.to_support_request()
-    if support_request is None or not cfg.settings.otto_enabled:
+    if support_request is None:
+        return fastapi.Response()
+    if not request.app.state.rate_limiter.allow(support_request.user_id, now=datetime.now(tz=UTC)):
+        logs.log_event("slack_rate_limited", params={"user_id": support_request.user_id})
         return fastapi.Response()
     background.add_task(dispatch.handle_safely, support_request)
     return fastapi.Response()

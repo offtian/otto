@@ -88,6 +88,36 @@ class SlackGateway:
         """
         await self.client.chat_update(channel=channel, ts=ts, text=text, blocks=[])
 
+    async def set_status(self, *, channel: str, thread_ts: str, status: str) -> None:
+        """
+        Show (or clear, with ``""``) the assistant "is working" indicator on an
+        assistant thread — the agent-mode progress cue. Valid only on the app's
+        assistant threads; the caller treats a failure as best-effort.
+        """
+        await self.client.assistant_threads_setStatus(
+            channel_id=channel, thread_ts=thread_ts, status=status
+        )
+
+    async def set_suggested_prompts(
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        title: str,
+        prompts: list[tuple[str, str]],
+    ) -> None:
+        """
+        Offer the starter prompts shown when a user opens Otto's assistant pane.
+        Each prompt is a ``(title, message)`` pair — the message is what gets
+        sent if the user taps it.
+        """
+        await self.client.assistant_threads_setSuggestedPrompts(
+            channel_id=channel,
+            thread_ts=thread_ts,
+            title=title,
+            prompts=[{"title": title_, "message": message} for title_, message in prompts],
+        )
+
     async def post_escalation(self, *, channel: str, text: str, resolve_value: str) -> str:
         """
         Post an escalation card carrying a "Mark resolved" button and return

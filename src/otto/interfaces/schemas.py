@@ -44,6 +44,11 @@ class _Payload(pydantic.BaseModel):
 # --- Slack Events API -------------------------------------------------------
 
 
+class _AssistantThread(_Payload):
+    channel_id: str = ""
+    thread_ts: str = ""
+
+
 class _SlackEvent(_Payload):
     type: str = ""
     subtype: str | None = None
@@ -54,6 +59,8 @@ class _SlackEvent(_Payload):
     channel_type: str | None = None
     ts: str = ""
     thread_ts: str | None = None
+    # Present only on assistant_thread_started (agent-mode entry, 3.5).
+    assistant_thread: _AssistantThread | None = None
 
 
 class SlackEventEnvelope(_Payload):
@@ -84,6 +91,19 @@ class SlackEventEnvelope(_Payload):
                 thread_ts=event.thread_ts or event.ts,
             ),
         )
+
+    def to_assistant_greeting(self) -> dispatch.AssistantGreeting | None:
+        """
+        Map an ``assistant_thread_started`` event to a greeting instruction
+        (agent-mode entry, 3.5), or None for any other event.
+        """
+        event = self.event
+        if event is None or event.type != "assistant_thread_started":
+            return None
+        thread = event.assistant_thread
+        if thread is None or not thread.channel_id:
+            return None
+        return dispatch.AssistantGreeting(channel=thread.channel_id, thread_ts=thread.thread_ts)
 
 
 # --- Slack interactivity (Block Kit actions) --------------------------------
