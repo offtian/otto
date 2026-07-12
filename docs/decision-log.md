@@ -7,6 +7,15 @@ this log preserves *how we got there*.
 
 ---
 
+## 2026-07-13 — Slack agent mode + rate limiting (D20, 3.5 pulled forward)
+
+Pulled 3.5's single-replica-safe pieces forward on request (the re-plan had
+deferred all of 3.5 to the multi-replica trigger).
+
+| ID | Decision | Status | Notes |
+|---|---|---|---|
+| D20 | **Otto presents as a Slack "agent-mode" assistant.** On `assistant_thread_started` it posts a welcome + starter prompts (`assistant.threads.setSuggestedPrompts`); while working it shows an `assistant.threads.setStatus` "is working" cue; answers and the automation-framed approval cards (D19) carry the Block Kit surface. Plus a per-user in-process rate limit (`slack_user_rate_limit_per_minute`). All behind the existing interface/vendor seam — zero agent changes (NFR5). | Applied (code + fakes) | "Streaming" is `setStatus` progress, not token streaming (Slack has none). **Redis dedup stays deferred** to the multi-replica trigger. **Live verification is 🔒 T7**: the dev Slack app manifest must declare the assistant view, add the `assistant:write` scope, and subscribe to `assistant_thread_started`. The thinking cue is gated to DM/assistant threads (channel id starts with `D`) and is best-effort — a status failure never blocks the reply. |
+
 ## 2026-07-13 — Phase 3 re-plan: HITL hardening over session memory (D19)
 
 Re-planned Phase 3 at the Phase 2 exit (the plan mandated it). Most steps stay
