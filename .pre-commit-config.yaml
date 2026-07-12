@@ -1,0 +1,12 @@
+# Pre-commit hooks for Otto.
+# Install via: uv run pre-commit install
+# Refresh pins via: uv run pre-commit autoupdate
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.0
+    hooks:
+      - id: ruff-format
+        types_or: [python, pyi]
+      - id: ruff
+        args: [--fix]
+        types_or: [python, pyi]

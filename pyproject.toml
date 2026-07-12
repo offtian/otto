@@ -1,0 +1,286 @@
+# Otto
+#
+# Managed with uv (https://docs.astral.sh/uv/):
+#   uv sync            install (creates .venv and uv.lock)
+#   uv add <package>   add a dependency
+#   uv lock --upgrade  refresh the lockfile
+
+# Project
+# -------
+
+[project]
+name = "otto"
+version = "0.1.0"
+description = "Otto — firmwide Slack-native tech-support agent: OpenAI Agents SDK, HITL approvals, MCP integrations (Confluence, SailPoint)."
+readme = "README.md"
+authors = [{ name = "Ollie Tian", email = "oliver.fengtian@gmail.com" }]
+requires-python = ">=3.13"
+
+dependencies = [
+    "attrs",
+    "pydantic-settings>=2.7",
+    "structlog>=24.0",
+    # Data layer: databases lib for runtime queries, SQLModel metadata +
+    # alembic for schema and migrations (see src/*/data/__init__.py).
+    "databases[asyncpg]",
+    "sqlmodel",
+    "sqlalchemy[asyncio]",
+    "alembic",
+    "asyncpg",
+]
+
+[dependency-groups]
+dev = [
+    # Testing
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "pytest-mock",
+    "pytest-xdist",
+    # Linting & typing
+    "ruff",
+    "mypy",
+    "import-linter",
+    # Localdev
+    "pre-commit",
+    "ipdb",
+]
+
+# Packaging
+# ---------
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/otto"]
+
+[tool.uv]
+package = true
+
+# Ruff
+# ----
+#
+# Philosophy: start from ALL and opt out deliberately. Every ignore below is a
+# considered preference, grouped and commented so the intent survives. When a
+# rule fires and feels wrong, prefer fixing the code; if the rule itself is
+# wrong for this codebase, add it to the right group below WITH a comment.
+# Prefer per-file ignores over widening the global list.
+
+[tool.ruff]
+line-length = 99
+target-version = "py313"
+src = ["src", "tests"]
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+exclude = ["**/migrations/**"]  # generated code (alembic revisions + env)
+ignore = [
+    # -- Formatter overlap: ruff format owns layout --------------------------
+    "COM812",  # trailing-comma enforcement fights the formatter
+    "ISC001",  # implicit str concat detection fights the formatter
+    "E501",    # line length: the formatter wraps what it can; long URLs/strings may stay
+    "W505",    # doc line length: same reasoning as E501
+
+    # -- Docstrings: useful prose over ceremony -------------------------------
+    # House style: newline after the opening triple-quote (D213), no blank
+    # line before class docstrings (D211). Write docstrings where they add
+    # signal, not everywhere.
+    "D1",      # missing docstrings — not every symbol needs one
+    "D200",    # don't force one-line docstrings onto one line
+    "D203",    # conflicts with D211 (blank line before class docstring)
+    "D205",    # no forced blank line between summary and body
+    "D212",    # conflicts with D213 (summary starts on the second line)
+    "D301",    # no forced r""" for backslashes
+    "D400",    # prose policing: first line need not end in a period
+    "D401",    # prose policing: no forced imperative mood
+    "D406",    # section-formatting minutiae
+    "D407",    # section-formatting minutiae
+    "D408",    # section-formatting minutiae
+    "D413",    # section-formatting minutiae
+    "D415",    # prose policing: first line punctuation
+
+    # -- Type annotations: mypy strict is the source of truth ----------------
+    "ANN001",  # unannotated function args — mypy strict enforces where it matters
+    "ANN002",  # unannotated *args
+    "ANN003",  # unannotated **kwargs
+    "ANN204",  # special-method return types
+    "ANN401",  # Any is sometimes the honest type
+
+    # -- Considered disagreements ---------------------------------------------
+    "A005",    # module names may shadow stdlib (logs.py) — module-import style disambiguates
+    "ARG",     # unused arguments are normal in interfaces, callbacks and overrides
+    "BLE001",  # broad except is fine at boundaries when logged or re-raised
+    "EM",      # exception message literals are fine (see also TRY003)
+    "ERA001",  # commented-out code is caught in review, not by regex
+    "FIX",     # FIXME/TODO markers are allowed to live in the codebase
+    "N818",    # exception names don't need an -Error suffix
+    "PERF401", # explicit loops can be clearer than comprehensions
+    "PLC0414", # import-as-self is how module re-export works
+    "PLC0415", # convention is imports-at-top; the rare sanctioned lazy import needs no noqa
+    "PLR0904", # complexity counters — C901 (max-complexity) is the single gate
+    "PLR0911", # complexity counters
+    "PLR0912", # complexity counters
+    "PLR0913", # complexity counters
+    "PLR2004", # magic-value comparisons: fine for status codes and small constants
+    "PLR5501", # collapsible else-if can read better spelled out
+    "PLR6301", # "could be a static method" — methods stay methods
+    "PTH123",  # open() is fine; pathlib is not mandatory
+    "PYI041",  # int | float unions are deliberate
+    "RUF001",  # ambiguous-unicode false alarms (dashes/quotes in strings)
+    "S104",    # binding 0.0.0.0 is intended in containers
+    "S311",    # random is fine for non-crypto use
+    "SIM102",  # nested ifs can read better than compound conditions
+    "SIM108",  # ternary is not forced
+    "SIM300",  # Yoda-condition detector misfires
+    "SIM910",  # dict.get(x, None) is explicit — keep it
+    "TC001",   # no TYPE_CHECKING import shuffling — imports stay at top, plain
+    "TC002",   # no TYPE_CHECKING import shuffling
+    "TC003",   # no TYPE_CHECKING import shuffling
+    "TD002",   # TODOs don't need an author
+    "TD003",   # TODOs don't need an issue link
+    "TID252",  # relative imports inside a package are not policed
+    "TRY003",  # exception messages inline at the raise site are fine
+    "TRY300",  # no forced else-block returns
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]  # re-exports
+"tests/**" = [
+    "ANN",     # test signatures don't need annotations
+    "D",       # GWT comments carry the intent, not docstrings
+    "S101",    # pytest asserts (asserts stay banned in src/ — raise real exceptions)
+    "SLF001",  # tests may reach into privates
+    "INP001",  # test dirs are not packages
+    "FBT",     # boolean literals in test data/parametrize are fine
+]
+"scripts/**" = [
+    "INP001",  # CLI entry points run as files, not as a package
+    "T201",    # prints are the point
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.flake8-builtins]
+strict-checking = true
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+section-order = [
+    "future",
+    "standard-library",
+    "third-party",
+    "first-party",
+    "project",
+    "local-folder",
+]
+
+[tool.ruff.lint.isort.sections]
+"project" = ["otto", "tests"]
+
+# Import linter
+# -------------
+#
+# Layers are top → bottom: a module may import anything BELOW it, never above.
+# `exhaustive = true` forces every new top-level module into this list, so the
+# architecture stays deliberate as the project grows.
+#
+#   main         entry point — may wire everything
+#   interfaces   API routes, CLI commands, webhooks — no business logic
+#   application  use-case orchestration
+#   evals        evaluation harnesses (LLM evals, quality gates)
+#   config       composition root: builds objects (adapters, clients) from settings
+#   domain       pure business logic — below config, so it can never read it
+#   vendors      external SDK wrappers (Slack, PagerDuty, ...)
+#   data         persistence models and migrations — thin, no business logic
+#   utils        cross-cutting helpers (logging, ...)
+#   settings     env values only (pydantic-settings)
+
+[tool.importlinter]
+root_package = "otto"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Layered architecture"
+type = "layers"
+containers = ["otto"]
+exhaustive = true
+exhaustive_ignores = ["__main__"]
+layers = [
+    "main",
+    "interfaces",
+    "application",
+    "evals",
+    "config",
+    "domain",
+    "vendors",
+    "data",
+    "utils",
+    "settings",
+]
+
+[[tool.importlinter.contracts]]
+# Domain code takes values as parameters; it never reads the environment.
+name = "Domain does not read settings"
+type = "forbidden"
+source_modules = ["otto.domain"]
+forbidden_modules = ["otto.settings"]
+
+[[tool.importlinter.contracts]]
+name = "Stdlib logging forbidden (structlog only)"
+type = "forbidden"
+source_modules = ["otto"]
+forbidden_modules = ["logging"]
+ignore_imports = [
+    "otto.utils.logs -> logging",
+    "otto.data.migrations.alembic.env -> logging",
+]
+
+# Mypy
+# ----
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src"]
+mypy_path = "src"
+exclude = ["migrations"]
+plugins = ["pydantic.mypy"]
+
+strict = true
+warn_unreachable = true
+warn_no_return = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+allow_untyped_defs = true
+
+# Pytest
+# ------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "error",
+]
+
+# Coverage
+# --------
+
+[tool.coverage.run]
+source = ["otto"]
+
+[tool.coverage.report]
+# Raise the bar as the project matures, e.g. fail_under = 80
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    'if __name__ == "__main__":',
+]
