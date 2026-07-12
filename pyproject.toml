@@ -269,6 +269,9 @@ allow_untyped_defs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Import otto from src directly: on macOS, uv writes the editable-install
+# .pth with the UF_HIDDEN flag and CPython 3.13 skips hidden .pth files.
+pythonpath = ["src"]
 python_files = "test_*.py"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

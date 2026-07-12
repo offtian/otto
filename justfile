@@ -15,6 +15,9 @@ install:
 
 # Verify the virtualenv can import otto
 verify-install:
+    # macOS: uv installs .pth files with the UF_HIDDEN flag set, and
+    # CPython 3.13 skips hidden .pth files — clear it or imports break.
+    chflags nohidden .venv/lib/python*/site-packages/*.pth 2>/dev/null || true
     .venv/bin/python -c "import otto; print(otto.__file__)"
 
 # Update lockfile
@@ -26,7 +29,8 @@ lock:
 
 # Run the application
 run:
-    uv run python -m otto
+    # PYTHONPATH: the editable .pth is unreliable on macOS (UF_HIDDEN + py3.13)
+    PYTHONPATH=src uv run python -m otto
 
 # Docker Compose
 # --------------
@@ -79,7 +83,8 @@ lint:
     uv run ruff check src/ tests/
     uv run ruff format --check src/ tests/
     uv run mypy src/
-    uv run lint-imports
+    # PYTHONPATH: the editable .pth is unreliable on macOS (UF_HIDDEN + py3.13)
+    PYTHONPATH=src uv run lint-imports
 
 # Auto-fix lint issues and format
 fmt:
@@ -92,7 +97,7 @@ typecheck:
 
 # Import-linter check
 check-imports:
-    uv run lint-imports
+    PYTHONPATH=src uv run lint-imports
 
 # Database
 # --------
