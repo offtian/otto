@@ -134,7 +134,8 @@ Everything runs end-to-end **with zero external dependencies** (stub tools, in-m
 - [ ] HITL loop: `needs_approval` → pause → approval card → resume (in-memory store)
 - [ ] Telemetry: Logfire + optional OTLP exporter; `instrument_openai_agents()`
 - [ ] Eval harness: 3 golden cases + LLM judge, `just eval`
-- [ ] `compose.dev.yml` (Postgres + Jaeger), sample runbooks, `.env.example`
+- [x] `compose.yml` dev stack — all involved services: Postgres, Jaeger (OTLP), LiteLLM (gateway stand-in), Confluence MCP, containerized app, Slack tunnel
+- [ ] Sample runbooks, `.env.example` finalized
 - **Exit:** `just lint && just test` green; DM → stubbed answer → approval card → resume works against a dev Slack workspace.
 
 ### Phase 1 — Knowledge MVP pilot *(weeks 1–3)*

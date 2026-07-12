@@ -1,0 +1,110 @@
+# Dev stack for Otto — every service the agent talks to, runnable locally.
+#
+#   docker compose up -d                                  # infra: Postgres + Jaeger
+#   docker compose --profile gateway --profile mcp up -d  # + LLM gateway + Confluence MCP
+#   docker compose --profile app up -d --build            # + containerized Otto
+#   docker compose --profile tunnel up -d                 # + public URL for Slack (see logs)
+#
+# The app usually runs on the host (`just run`) against these services;
+# the `app` profile containerizes it for parity testing.
+
+services:
+  # --- Core infrastructure (default profile) --------------------------------
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: otto
+      POSTGRES_HOST_AUTH_METHOD: trust # localdev only
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d otto"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  jaeger:
+    # Dev trace backend + UI (http://localhost:16686) that ingests OTLP
+    # directly — the app's OTLP_ENDPOINT points here. In prod, point
+    # OTLP_ENDPOINT at the firm's collector tier (OTel Collector / Grafana
+    # Alloy) instead; nothing in the app changes. If you want dev parity
+    # with a Grafana shop, swap this service for grafana/otel-lgtm
+    # (Grafana + Tempo + Loki + Prometheus, built-in collector).
+    image: jaegertracing/all-in-one:1.60
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP -> OTLP_ENDPOINT=http://localhost:4318
+
+  # --- LLM gateway stand-in (profile: gateway) ------------------------------
+  # Dev substitute for the firm's OpenAI-compatible gateway.
+  # App-side: LLM_BASE_URL=http://localhost:4000/v1
+
+  litellm:
+    profiles: ["gateway"]
+    image: ghcr.io/berriai/litellm:main-latest
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - ./dev/litellm.yaml:/etc/litellm/config.yaml:ro
+    ports:
+      - "4000:4000"
+
+  # --- MCP servers (profile: mcp) --------------------------------------------
+  # Confluence via the community Atlassian MCP server (streamable HTTP).
+  # App-side: CONFLUENCE_MCP_URL=http://localhost:9000/mcp
+  #
+  # SailPoint (Phase 2) has no public dev image — point SAILPOINT_MCP_URL at
+  # the firm-hosted server, or add a mock service here.
+
+  mcp-confluence:
+    profiles: ["mcp"]
+    image: ghcr.io/sooperset/mcp-atlassian:latest
+    command: ["--transport", "streamable-http", "--port", "9000"]
+    environment:
+      CONFLUENCE_URL: ${CONFLUENCE_URL:-}
+      CONFLUENCE_USERNAME: ${CONFLUENCE_USERNAME:-}
+      CONFLUENCE_API_TOKEN: ${CONFLUENCE_API_TOKEN:-}
+    ports:
+      - "9000:9000"
+
+  # --- Otto itself (profile: app) --------------------------------------------
+
+  app:
+    profiles: ["app"]
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # In-network overrides of the localhost values in .env
+      DATABASE_URL: postgresql+asyncpg://postgres@postgres:5432/otto
+      OTLP_ENDPOINT: http://jaeger:4318
+      LLM_BASE_URL: http://litellm:4000/v1
+      CONFLUENCE_MCP_URL: http://mcp-confluence:9000/mcp
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --- Public tunnel for Slack in dev (profile: tunnel) ----------------------
+  # Slack's Events API needs a public HTTPS URL. `docker compose logs tunnel`
+  # prints it; paste it into the Slack app's Event Subscriptions and
+  # Interactivity request URLs (…/slack/events and …/slack/interactions).
+
+  tunnel:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:latest
+    command: ["tunnel", "--no-autoupdate", "--url", "http://app:8000"]
+    depends_on:
+      - app
+
+volumes:
+  postgres-data:

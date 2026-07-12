@@ -1,0 +1,7 @@
+# LiteLLM proxy config — dev stand-in for the firm's LLM gateway.
+# Add an entry per model Otto should be able to reach.
+model_list:
+  - model_name: gpt-5.1
+    litellm_params:
+      model: openai/gpt-5.1
+      api_key: os.environ/OPENAI_API_KEY

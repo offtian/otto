@@ -28,6 +28,26 @@ lock:
 run:
     uv run python -m otto
 
+# Docker Compose
+# --------------
+
+# Start core dev infrastructure (Postgres + Jaeger)
+infra:
+    docker compose up -d
+
+# Start the full dev stack (+ LLM gateway, Confluence MCP, containerized app)
+stack:
+    docker compose --profile gateway --profile mcp --profile app up -d --build
+
+# Expose the app publicly for Slack and tail the URL
+tunnel:
+    docker compose --profile tunnel up -d
+    docker compose logs -f tunnel
+
+# Stop and remove all dev services
+infra-down:
+    docker compose down
+
 # Testing
 # -------
 
