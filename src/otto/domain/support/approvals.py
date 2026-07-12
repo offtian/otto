@@ -8,10 +8,14 @@ decision — including the serialized Agents SDK run state.
 
 import enum
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 import attrs
+import databases
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql as pg
 
+from otto.data import models
 from otto.domain.support import entities
 
 
@@ -126,3 +130,104 @@ class InMemoryApprovalStore:
         )
         self._approvals[approval_id] = resolved
         return resolved
+
+
+# SQLModel exposes the SQLAlchemy Table at runtime; mypy needs the hint.
+_TABLE: sa.Table = models.ApprovalRecord.__table__  # type: ignore[attr-defined]
+
+
+@attrs.frozen
+class PostgresApprovalStore:
+    """
+    Durable approval store over Postgres (2.2, the ApprovalStore protocol).
+
+    ``resolve`` is a conditional UPDATE guarded on ``status = pending``, so two
+    concurrent approvers can never both execute the run — the exactly-once,
+    zero-double-write guarantee that FR4/FR6 rest on. The ``Database`` is
+    injected by ``config`` so the domain never imports ``data.db`` (which reads
+    settings); this store touches only ``data.models`` (the table).
+    """
+
+    database: databases.Database
+
+    async def save(self, approval: PendingApproval) -> None:
+        table = _TABLE
+        row = _to_row(approval)
+        insert = pg.insert(table).values(**row, created_at=sa.func.now())
+        # Insert-or-replace per the protocol, but never reset created_at.
+        insert = insert.on_conflict_do_update(
+            index_elements=[table.c.id],
+            set_={column: row[column] for column in row if column != "id"},
+        )
+        await self.database.execute(insert)
+
+    async def get(self, approval_id: str) -> PendingApproval:
+        table = _TABLE
+        row = await self.database.fetch_one(sa.select(table).where(table.c.id == approval_id))
+        if row is None:
+            raise ApprovalNotFound(f"no approval with id {approval_id!r}")
+        return _from_row(row)
+
+    async def resolve(
+        self, approval_id: str, status: ApprovalStatus, *, resolver_id: str
+    ) -> PendingApproval:
+        table = _TABLE
+        update = (
+            sa.update(table)
+            .where(
+                sa.and_(
+                    table.c.id == approval_id,
+                    table.c.status == ApprovalStatus.PENDING.value,
+                )
+            )
+            .values(status=status.value, resolver_id=resolver_id, resolved_at=sa.func.now())
+            .returning(*table.c)
+        )
+        updated = await self.database.fetch_one(update)
+        if updated is not None:
+            return _from_row(updated)
+        # Nothing updated: the guard held. Distinguish unknown from already-resolved.
+        exists = await self.database.fetch_one(
+            sa.select(table.c.id).where(table.c.id == approval_id)
+        )
+        if exists is None:
+            raise ApprovalNotFound(f"no approval with id {approval_id!r}")
+        raise ApprovalAlreadyResolved(f"approval {approval_id!r} is already resolved")
+
+
+def _to_row(approval: PendingApproval) -> dict[str, object]:
+    return {
+        "id": approval.id,
+        "request_id": approval.request_id,
+        "requester_id": approval.requester_id,
+        "origin": entities.origin_to_json(approval.origin),
+        "request_text": approval.request_text,
+        "tool_name": approval.tool_name,
+        "tool_arguments": approval.tool_arguments,
+        "run_state_json": approval.run_state_json,
+        "status": approval.status.value,
+        "card_channel": approval.card_channel,
+        "card_ts": approval.card_ts,
+        "resolver_id": approval.resolver_id,
+        "resolved_at": approval.resolved_at,
+    }
+
+
+def _from_row(row: Any) -> PendingApproval:
+    # ``row`` is a databases Record (mapping access by column name).
+    data: dict[str, Any] = dict(row)
+    return PendingApproval(
+        id=data["id"],
+        request_id=data["request_id"],
+        requester_id=data["requester_id"],
+        origin=entities.origin_from_json(data["origin"]),
+        request_text=data["request_text"],
+        tool_name=data["tool_name"],
+        tool_arguments=data["tool_arguments"],
+        run_state_json=data["run_state_json"] or "",
+        status=ApprovalStatus(data["status"]),
+        card_channel=data["card_channel"],
+        card_ts=data["card_ts"],
+        resolver_id=data["resolver_id"],
+        resolved_at=data["resolved_at"],
+    )

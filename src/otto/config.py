@@ -21,6 +21,7 @@ from agents import mcp as agents_mcp
 from agents.models import interface as model_interface
 from slack_sdk.web.async_client import AsyncWebClient
 
+from otto.data import db as data_db
 from otto.domain.identity import users as identity_users
 from otto.domain.support import approvals
 from otto.settings import Settings, settings
@@ -88,7 +89,13 @@ def get_config() -> Configuration:
         directory=identity_users.UserDirectory(
             users=identity_users.load_users(pathlib.Path(settings.users_file))
         ),
-        approvals=approvals.InMemoryApprovalStore(),
+        # Durable store when a database is configured (Phase 2); the in-memory
+        # store keeps the zero-dependency dev loop when DATABASE_URL is empty.
+        approvals=(
+            approvals.PostgresApprovalStore(database=data_db.get_db())
+            if settings.database_url
+            else approvals.InMemoryApprovalStore()
+        ),
         model=llm.build_model(
             base_url=settings.llm_base_url,
             api_key=settings.llm_api_key,

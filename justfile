@@ -63,9 +63,9 @@ test *ARGS:
 test-unit *ARGS:
     uv run pytest tests/unit/ -x -vv {{ ARGS }}
 
-# Run integration tests
+# Run integration tests (needs `just infra` Postgres + migrations applied)
 test-integration *ARGS:
-    uv run pytest tests/integration/ -x -vv {{ ARGS }}
+    RUN_INTEGRATION=1 uv run pytest tests/integration/ -x -vv {{ ARGS }}
 
 # Run functional / end-to-end tests
 test-functional *ARGS:

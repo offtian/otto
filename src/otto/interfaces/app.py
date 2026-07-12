@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 import fastapi
 
 from otto import config
+from otto.data import db as data_db
 from otto.interfaces.routers import base, jira, slack
 from otto.utils import logs, telemetry
 
@@ -51,6 +52,8 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
         otlp_endpoint=cfg.settings.otlp_endpoint,
     )
     telemetry.instrument_app(started_app)
+    if cfg.settings.database_url:
+        await data_db.connect_db()  # durable approval store (Phase 2)
     servers = [s for s in (cfg.confluence_mcp, cfg.sailpoint_mcp) if s is not None]
     for server in servers:
         await server.connect()  # type: ignore[no-untyped-call]  # SDK method lacks annotations
@@ -58,6 +61,8 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
     yield
     for server in servers:
         await server.cleanup()  # type: ignore[no-untyped-call]  # SDK method lacks annotations
+    if cfg.settings.database_url:
+        await data_db.disconnect_db()
 
 
 app = fastapi.FastAPI(title="otto", lifespan=_lifespan)
