@@ -7,6 +7,7 @@ decision — including the serialized Agents SDK run state.
 """
 
 import enum
+from datetime import UTC, datetime
 from typing import Protocol
 
 import attrs
@@ -50,6 +51,11 @@ class PendingApproval:
     status: ApprovalStatus = ApprovalStatus.PENDING
     card_channel: str = ""
     card_ts: str = ""
+    # Audit trail, set on resolve (empty/None while pending). The durable store
+    # persists these to ApprovalRecord; the in-memory store carries them too so
+    # the returned entity is complete.
+    resolver_id: str = ""
+    resolved_at: datetime | None = None
 
 
 class ApprovalStore(Protocol):
@@ -71,9 +77,12 @@ class ApprovalStore(Protocol):
         """
         ...
 
-    async def resolve(self, approval_id: str, status: ApprovalStatus) -> PendingApproval:
+    async def resolve(
+        self, approval_id: str, status: ApprovalStatus, *, resolver_id: str
+    ) -> PendingApproval:
         """
-        Transition a pending approval to a terminal status and return it.
+        Transition a pending approval to a terminal status, record who
+        resolved it (audit), and return it.
 
         :raises ApprovalNotFound: if the id is unknown.
         :raises ApprovalAlreadyResolved: if it is not pending.
@@ -99,12 +108,21 @@ class InMemoryApprovalStore:
         except KeyError:
             raise ApprovalNotFound(f"no approval with id {approval_id!r}") from None
 
-    async def resolve(self, approval_id: str, status: ApprovalStatus) -> PendingApproval:
+    async def resolve(
+        self, approval_id: str, status: ApprovalStatus, *, resolver_id: str
+    ) -> PendingApproval:
         approval = await self.get(approval_id)
         if approval.status is not ApprovalStatus.PENDING:
             raise ApprovalAlreadyResolved(
                 f"approval {approval_id!r} is already {approval.status.value}"
             )
-        resolved = attrs.evolve(approval, status=status)
+        # ponytail: dev store stamps its own resolved_at; the durable store
+        # will use the DB server clock so the audit time is authoritative.
+        resolved = attrs.evolve(
+            approval,
+            status=status,
+            resolver_id=resolver_id,
+            resolved_at=datetime.now(tz=UTC),
+        )
         self._approvals[approval_id] = resolved
         return resolved

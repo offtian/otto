@@ -78,7 +78,7 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
 
     status = approvals.ApprovalStatus.APPROVED if approved else approvals.ApprovalStatus.DENIED
     try:
-        await cfg.approvals.resolve(approval_id, status)
+        await cfg.approvals.resolve(approval_id, status, resolver_id=resolver_id)
     except approvals.ApprovalAlreadyResolved:
         logs.log_event(
             "approval_already_resolved",

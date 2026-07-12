@@ -3,6 +3,7 @@ Core support-request entities, agnostic of the interface they arrived from.
 """
 
 import enum
+import json
 
 import attrs
 
@@ -43,6 +44,35 @@ class TicketRef:
 # Phase 2 ApprovalRecord all address a request through this, never through
 # one channel's raw fields.
 Origin = SlackThread | TicketRef
+
+
+def origin_to_json(origin: Origin) -> str:
+    """
+    Serialize an origin to a channel-tagged JSON string for durable storage
+    (the ApprovalRecord ``origin`` column). Round-trips via ``origin_from_json``.
+    """
+    match origin:
+        case SlackThread(channel_id=channel_id, thread_ts=thread_ts):
+            payload = {"kind": "slack", "channel_id": channel_id, "thread_ts": thread_ts}
+        case TicketRef(issue_key=issue_key):
+            payload = {"kind": "ticket", "issue_key": issue_key}
+    return json.dumps(payload)
+
+
+def origin_from_json(raw: str) -> Origin:
+    """
+    Rebuild an origin from its ``origin_to_json`` form.
+
+    :raises ValueError: if the stored kind is unknown.
+    """
+    data = json.loads(raw)
+    match data.get("kind"):
+        case "slack":
+            return SlackThread(channel_id=data["channel_id"], thread_ts=data["thread_ts"])
+        case "ticket":
+            return TicketRef(issue_key=data["issue_key"])
+        case other:
+            raise ValueError(f"unknown origin kind {other!r}")
 
 
 @attrs.frozen
