@@ -7,6 +7,16 @@ this log preserves *how we got there*.
 
 ---
 
+## 2026-07-13 — Phase 3 re-plan: HITL hardening over session memory (D19)
+
+Re-planned Phase 3 at the Phase 2 exit (the plan mandated it). Most steps stay
+trigger-gated; 3.3 was re-scoped.
+
+| ID | Decision | Status | Notes |
+|---|---|---|---|
+| D19 | **The human approval on a SailPoint request authorizes *automation* — letting Otto file and submit the request on the requester's behalf — not the entitlement grant.** The target system (SailPoint) runs its own approval chain over whether the person actually gets the access. The Block Kit card, the requester's holding message, and the collected justification are framed accordingly. | Applied | Correction to the earlier framing, where the card read like an access grant. Otto's approver is a role-holder authorizing an automated write to a system of record; the entitlement decision stays with SailPoint (consistent with D15 — "entitlement policy stays SailPoint's job"). |
+| — | **3.3 re-scoped from "persistent session memory" to "HITL loop hardening."** The concern that motivated session memory — recovering the approval loop across a long (e.g. 30-min) review gap — is already durable via the Phase 2 `run_state_json` mechanism: a paused run serializes to Postgres and rehydrates on the eventual click, surviving restarts and concurrent tickets, with the 2.5 sweep covering never-reviewed approvals. 3.3 now covers the two real gaps in the concurrent/delayed case: duplicate-approval suppression (`find_pending` on origin+tool) and automation-framed cards (D19). | Applied | SDK session memory (replacing D2 reconstruction) is deferred to its trigger — it worsens PII-at-rest for no prototype-scale gain (D7). Revisit when multi-turn re-fetch cost is real or the graduation PII/scrubbing posture is decided. |
+
 ## 2026-07-12 — Eval-gate location (D5 closed)
 
 | ID | Decision | Status | Notes |
