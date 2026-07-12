@@ -51,7 +51,7 @@ Marked `[TBC: Tn]` where they appear in the plan. **Open decisions (yours):**
 
 **Status legend:** `[x]` done · `[ ]` 🟡 partial · `[ ]` ⬜ not started · `[ ]` ⏳ needs your decision · `[ ]` 🔒 blocked on an external account/service. The checklist under each phase is the at-a-glance tracker; the table below it holds the full detail (gate, goal, I/O, risks, acceptance criteria) for each step.
 
-**Overall:** Phase 0 — **8/11 done**; 0.8 partial (only the live Jaeger span-check left), 0.1 + 0.11 blocked on external accounts. Phase 1 — **1.1/1.3/1.5 done, 1.2 partial** (gate + record/replay tests done; golden set growing); 1.4 blocked on real Confluence (T6), 1.6 needs a real pilot. Phases 2–3 — not started.
+**Overall:** Phase 0 — **8/11 done**; 0.8 partial (only the live Jaeger span-check left), 0.1 + 0.11 blocked on external accounts. Phase 1 — **1.1/1.3/1.5 done, 1.2 partial** (gate + record/replay tests done; golden set growing); 1.4 blocked on real Confluence (T6), 1.6 needs a real pilot. Phase 2 — **2.2 done & verified** (durable store) + 2.1/2.3 schemas landed; 2.4/2.6 need decisions + compose, 2.5/2.7 build on the store. Phase 3 — not started.
 
 ### Phase 0: Walking skeleton — full loop end-to-end on both channels with zero external dependencies
 
@@ -107,8 +107,8 @@ Checkpoint: real Confluence answers with citations on both channels; resolution 
 
 Checkpoint: 50 access requests (staged against the mock in prototype) with **zero** unapproved writes; audit report generated from the store.
 
-- [ ] **2.1** `ApprovalRecord` schema + retention policy — 🟡 schema + first migration landed (offline-verified DDL) and `resolve(+resolver_id)`/`resolved_at` audit fields wired; ⏳ confirm the `run_state_json` retention window (defaulted to 30d)
-- [ ] **2.2** `PostgresApprovalStore` — 🟡 foundation done (protocol/entity/InMemory + origin round-trip); store + config swap + integration suite **deferred until Docker/Postgres is up** (needs `just infra`)
+- [ ] **2.1** `ApprovalRecord` schema + retention policy — 🟡 schema + migration + audit fields (`resolve(+resolver_id)`/`resolved_at`) **done & verified against live Postgres** (up/down cycle clean); ⏳ confirm the `run_state_json` retention window (defaulted to 30d)
+- [x] **2.2** `PostgresApprovalStore` — **done & verified**: conditional-UPDATE store, config swap (Postgres when `DATABASE_URL` set), lifespan connect; 7 integration tests incl. concurrent-resolve; drain runbook (`docs/drain-approvals.md`)
 - [ ] **2.3** Roles → Postgres table (+ fold in the D15 identity directory) — 🟡 schema + migration landed (offline-verified `users` table: D15 identity + D3 role); config wiring (DB directory + fail-closed role lookup, settings fallback) + integration **deferred until Docker**
 - [ ] **2.4** SailPoint MCP — mock now, real at graduation — ⏳ your call + 🔒 T8 mock surface
 - [ ] **2.5** Expiry, reminders, retention sweep — ⬜ not started
