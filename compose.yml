@@ -100,7 +100,10 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres@postgres:5432/otto
       OTLP_ENDPOINT: http://jaeger:4318
       LLM_BASE_URL: http://litellm:4000/v1
-      CONFLUENCE_MCP_URL: http://mcp-confluence:9000/mcp
+      # Confluence MCP needs real credentials (T6): the mcp-atlassian server
+      # 401s without them. Wire it only when CONFLUENCE_URL is set — otherwise
+      # empty, so the app falls back to the read-only stub and still boots.
+      CONFLUENCE_MCP_URL: ${CONFLUENCE_URL:+http://mcp-confluence:9000/mcp}
       # Only reachable when the `sailpoint` profile is also up.
       SAILPOINT_MCP_URL: http://mcp-sailpoint:9100/mcp
     ports:

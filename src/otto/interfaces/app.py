@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import fastapi
+from agents import mcp as agents_mcp
 
 from otto import config
 from otto.application import support
@@ -104,8 +105,17 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
     if cfg.settings.database_url:
         await data_db.connect_db()  # durable approval store (Phase 2)
     servers = [s for s in (cfg.confluence_mcp, cfg.sailpoint_mcp) if s is not None]
+    connected: list[agents_mcp.MCPServerStreamableHttp] = []
     for server in servers:
-        await server.connect()  # type: ignore[no-untyped-call]  # SDK method lacks annotations
+        try:
+            await server.connect()  # type: ignore[no-untyped-call]  # SDK method lacks annotations
+        except Exception as exc:
+            # A misconfigured or unavailable MCP degrades its own capability
+            # (its tool errors per request, caught by FR8) — it must never take
+            # the whole service down at startup.
+            logs.log_exception(exc, params={"mcp_connect": type(server).__name__})
+            continue
+        connected.append(server)
     # Approval maintenance sweep (2.5): only meaningful against the durable
     # store, and the interval is a kill switch (0 = off).
     sweep_task: asyncio.Task[None] | None = None
@@ -119,7 +129,7 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
         sweep_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await sweep_task
-    for server in servers:
+    for server in connected:
         await server.cleanup()  # type: ignore[no-untyped-call]  # SDK method lacks annotations
     if cfg.settings.database_url:
         await data_db.disconnect_db()
