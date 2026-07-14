@@ -116,13 +116,19 @@ services:
   # Slack's Events API needs a public HTTPS URL. `docker compose logs tunnel`
   # prints it; paste it into the Slack app's Event Subscriptions and
   # Interactivity request URLs (…/slack/events and …/slack/interactions).
+  #
+  # Targets host.docker.internal:8000 — the host-published app port — so it
+  # works whether Otto runs on the host (`just run`, the usual flow) or in the
+  # `app` container. No `depends_on: app`: it reaches the app across the host
+  # boundary, which also keeps `--profile tunnel` a valid standalone project
+  # (a depends_on into the app-only profile made the whole project invalid).
 
   tunnel:
     profiles: ["tunnel"]
     image: cloudflare/cloudflared:latest
-    command: ["tunnel", "--no-autoupdate", "--url", "http://app:8000"]
-    depends_on:
-      - app
+    command: ["tunnel", "--no-autoupdate", "--url", "http://host.docker.internal:8000"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   postgres-data:
