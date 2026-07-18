@@ -1,0 +1,12 @@
+{
+  "webhookEvent": "jira:issue_created",
+  "issue": {
+    "id": "@@ID@@",
+    "key": "IT-101",
+    "fields": {
+      "summary": "VPN keeps dropping on hotel wifi",
+      "description": "Since yesterday my Cisco AnyConnect VPN disconnects every few minutes on hotel wifi. It's fine at the office. What can I try?",
+      "reporter": { "accountId": "acct-dana" }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "webhookEvent": "jira:issue_created",
+  "issue": {
+    "id": "@@ID@@",
+    "key": "IT-102",
+    "fields": {
+      "summary": "Need Snowflake reporting access",
+      "description": "I've joined the Data Platform team and need read access to the Snowflake reporting warehouse to build the quarterly dashboards. Justification: quarterly reporting.",
+      "reporter": { "accountId": "acct-dana" }
+    }
+  }
+}

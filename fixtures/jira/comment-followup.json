@@ -1,0 +1,9 @@
+{
+  "webhookEvent": "comment_created",
+  "issue": { "id": "10101", "key": "IT-101" },
+  "comment": {
+    "id": "@@ID@@",
+    "author": { "accountId": "acct-dana" },
+    "body": "Tried restarting the client, still dropping every few minutes. Any other ideas?"
+  }
+}

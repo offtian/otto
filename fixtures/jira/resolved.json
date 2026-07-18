@@ -1,0 +1,14 @@
+{
+  "webhookEvent": "jira:issue_updated",
+  "changelog": {
+    "id": "@@ID@@",
+    "items": [{ "field": "status", "toString": "Done" }]
+  },
+  "issue": {
+    "id": "10101",
+    "key": "IT-101",
+    "fields": {
+      "status": { "name": "Done", "statusCategory": { "key": "done" } }
+    }
+  }
+}

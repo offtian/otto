@@ -124,6 +124,29 @@ downgrade-db-migration:
 audit-report:
     PYTHONPATH=src uv run python -m otto.interfaces.audit_report
 
+# Fake payloads (local trace testing)
+# -----------------------------------
+
+app_url := "http://localhost:8000"
+
+# POST one fixtures/jira/ ticket at the running app (fresh id each fire, so it
+# never trips the redelivery dedup). Requires JIRA_WEBHOOK_SECRET set in .env.
+jira-fire FILE:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    body="$(sed "s/@@ID@@/test-$(uuidgen)/g" fixtures/jira/{{FILE}})"
+    curl -sS -X POST "{{app_url}}/jira/webhook?secret=${JIRA_WEBHOOK_SECRET:?set JIRA_WEBHOOK_SECRET in .env}" \
+        -H 'content-type: application/json' --data-binary "$body" \
+        -o /dev/null -w '{{FILE}} -> HTTP %{http_code}\n'
+
+# Fire the whole set: knowledge question, access request, follow-up, resolution
+jira-fire-all: (jira-fire "question-vpn.json") (jira-fire "access-snowflake.json") (jira-fire "comment-followup.json") (jira-fire "resolved.json")
+
+# Prove the agent works end-to-end (model + Agents SDK + tracing), no HTTP.
+# Usage: just agent-smoke  |  just agent-smoke "I need Snowflake reporting access"
+agent-smoke *QUESTION:
+    PYTHONPATH=src uv run python dev/smoke_agent.py {{QUESTION}}
+
 # Housekeeping
 # ------------
 
