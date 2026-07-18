@@ -277,8 +277,11 @@ if st.session_state.pending:
 # submit_access_request call and its approval pause. Hidden while an approval
 # is pending — the approval card is the conversation's tail then.
 if not st.session_state.pending:
-    with st.chat_message("assistant"), st.form("access_request"):
-        st.markdown("Need access to a system? Fill this in and I'll submit the request:")
+    with (
+        st.chat_message("assistant"),
+        st.expander(":material/lock_open: Request access to a system"),
+        st.form("access_request", border=False),
+    ):
         system = st.text_input("System", value="Snowflake reporting warehouse")
         entitlement = st.text_input("Entitlement", value="read access")
         justification = st.text_input("Justification", value="quarterly dashboards")
