@@ -1,6 +1,6 @@
 # Dev stack for Otto — every service the agent talks to, runnable locally.
 #
-#   docker compose up -d                                  # infra: Postgres + Jaeger
+#   docker compose up -d                                  # infra: Postgres + Grafana LGTM
 #   docker compose --profile gateway --profile mcp up -d  # + LLM gateway + Confluence MCP
 #   docker compose --profile app up -d --build            # + containerized Otto
 #   docker compose --profile langfuse up -d               # + Langfuse UI (http://localhost:3000)
@@ -27,18 +27,16 @@ services:
       timeout: 3s
       retries: 10
 
-  jaeger:
-    # Dev trace backend + UI (http://localhost:16686) that ingests OTLP
-    # directly — the app's OTLP_ENDPOINT points here. In prod, point
-    # OTLP_ENDPOINT at the firm's collector tier (OTel Collector / Grafana
-    # Alloy) instead; nothing in the app changes. If you want dev parity
-    # with a Grafana shop, swap this service for grafana/otel-lgtm
-    # (Grafana + Tempo + Loki + Prometheus, built-in collector).
-    image: jaegertracing/all-in-one:1.60
-    environment:
-      COLLECTOR_OTLP_ENABLED: "true"
+  lgtm:
+    # Dev trace backend with prod parity: grafana/otel-lgtm bundles
+    # Grafana + Tempo + Loki + Prometheus behind a built-in OTel collector,
+    # ingesting OTLP on the same 4318 the app already targets. Grafana UI at
+    # http://localhost:3001 (host 3000 belongs to Langfuse), anonymous admin.
+    # In prod, point OTLP_ENDPOINT at the firm's Alloy instead; nothing in
+    # the app changes.
+    image: grafana/otel-lgtm:latest
     ports:
-      - "16686:16686" # UI
+      - "3001:3000" # Grafana UI
       - "4317:4317" # OTLP gRPC
       - "4318:4318" # OTLP HTTP -> OTLP_ENDPOINT=http://localhost:4318
 
@@ -218,7 +216,7 @@ services:
     environment:
       # In-network overrides of the localhost values in .env
       DATABASE_URL: postgresql+asyncpg://postgres@postgres:5432/otto
-      OTLP_ENDPOINT: http://jaeger:4318
+      OTLP_ENDPOINT: http://lgtm:4318
       LLM_BASE_URL: http://litellm:4000/v1
       # Confluence MCP needs real credentials (T6): the mcp-atlassian server
       # 401s without them. Wire it only when CONFLUENCE_URL is set — otherwise

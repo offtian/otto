@@ -35,7 +35,7 @@ run:
 # Docker Compose
 # --------------
 
-# Start core dev infrastructure (Postgres + Jaeger)
+# Start core dev infrastructure (Postgres + Grafana LGTM)
 infra:
     docker compose up -d
 

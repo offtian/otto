@@ -4,8 +4,8 @@ Telemetry bootstrap: Logfire as the OpenTelemetry SDK + instrumentation layer.
 Spans flow to independent sinks — enable any subset:
 
 - Logfire (best UI for OpenAI Agents SDK traces) when a token is provided
-- any OTLP collector (Jaeger in dev, the firm APM in prod) when an
-  endpoint is provided
+- any OTLP collector (the Grafana LGTM stack in dev, Alloy in prod) when
+  an endpoint is provided
 - Langfuse via its native OTLP ingestion endpoint when a host + key pair
   is provided — no Langfuse SDK needed, which would double-instrument the
   agent spans next to Logfire
