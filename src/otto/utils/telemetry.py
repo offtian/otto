@@ -77,6 +77,7 @@ def setup_telemetry(
         additional_span_processors=additional_processors,
         console=False,
     )
+    logfire.instrument_system_metrics()
     logfire.instrument_openai_agents()
     # Drop the SDK's default trace processor — it uploads traces to the OpenAI
     # dashboard and warns when OPENAI_API_KEY is unset (we talk to Ollama/the
