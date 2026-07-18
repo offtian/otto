@@ -194,22 +194,6 @@ with st.sidebar:
         for _example in _questions:
             if st.button(_example, width="stretch", disabled=bool(st.session_state.pending)):
                 st.session_state.queued_question = _example
-    # Structured happy path for the SailPoint request — composes the message
-    # with all three fields present so the run goes straight to the gated
-    # submit_access_request call and its approval pause.
-    st.caption("Access request (HITL)")
-    with st.form("access_request"):
-        system = st.text_input("System", value="Snowflake reporting warehouse")
-        entitlement = st.text_input("Entitlement", value="read access")
-        justification = st.text_input("Justification", value="quarterly dashboards")
-        if st.form_submit_button(
-            "Request access", width="stretch", disabled=bool(st.session_state.pending)
-        ):
-            st.session_state.queued_question = (
-                f"Please submit an access request for me: I need the "
-                f"{entitlement!r} entitlement on {system!r}. "
-                f"Justification: {justification}."
-            )
 
 for message in st.session_state.history:
     with st.chat_message(message["role"]):
@@ -250,6 +234,24 @@ if st.session_state.pending:
             ):
                 _absorb(asyncio.run(_resume(pending["state_json"], approved=False)))
             st.rerun()
+
+# Structured happy path for the SailPoint request, rendered as an assistant
+# message at the bottom of the chat rather than sidebar chrome. Composes the
+# message with all three fields present so the run goes straight to the gated
+# submit_access_request call and its approval pause. Hidden while an approval
+# is pending — the approval card is the conversation's tail then.
+if not st.session_state.pending:
+    with st.chat_message("assistant"), st.form("access_request"):
+        st.markdown("Need access to a system? Fill this in and I'll submit the request:")
+        system = st.text_input("System", value="Snowflake reporting warehouse")
+        entitlement = st.text_input("Entitlement", value="read access")
+        justification = st.text_input("Justification", value="quarterly dashboards")
+        if st.form_submit_button("Request access", width="stretch"):
+            st.session_state.queued_question = (
+                f"Please submit an access request for me: I need the "
+                f"{entitlement!r} entitlement on {system!r}. "
+                f"Justification: {justification}."
+            )
 
 question = st.chat_input(
     "Ask Otto…", disabled=bool(st.session_state.pending)
