@@ -147,6 +147,11 @@ jira-fire-all: (jira-fire "question-vpn.json") (jira-fire "access-snowflake.json
 agent-smoke *QUESTION:
     PYTHONPATH=src uv run python dev/smoke_agent.py {{ quote(QUESTION) }}
 
+# Chat with the agent in the browser — mimics the Slack integration
+# (same agent, telemetry, and HITL approval round-trip), no Slack needed.
+chat:
+    PYTHONPATH=src uv run streamlit run src/otto/interfaces/chat_app.py
+
 # Housekeeping
 # ------------
 

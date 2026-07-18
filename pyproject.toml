@@ -61,6 +61,7 @@ dev = [
     "ipdb",
     "httpx2>=2.5.0",
     "types-pyyaml>=6.0.12.20260518",
+    "streamlit>=1.59.2",
 ]
 
 # Packaging
