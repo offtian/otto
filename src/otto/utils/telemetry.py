@@ -17,6 +17,7 @@ and LLM generation; FastAPI requests are instrumented per-app via
 
 import base64
 
+import agents
 import logfire
 from opentelemetry.exporter.otlp.proto.http import trace_exporter
 from opentelemetry.sdk.trace import export as trace_export
@@ -77,6 +78,11 @@ def setup_telemetry(
         console=False,
     )
     logfire.instrument_openai_agents()
+    # Drop the SDK's default trace processor — it uploads traces to the OpenAI
+    # dashboard and warns when OPENAI_API_KEY is unset (we talk to Ollama/the
+    # gateway, not OpenAI). Logfire captures spans at the trace-provider level,
+    # so it is unaffected.
+    agents.set_trace_processors([])
 
 
 def instrument_app(app: object) -> None:
