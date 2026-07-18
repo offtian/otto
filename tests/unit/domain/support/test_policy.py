@@ -1,5 +1,3 @@
-import types
-
 from otto.domain.support import policy
 
 
@@ -38,25 +36,3 @@ class TestSensitivityPolicy:
         # When their names are compared
         # Then the policy clears exactly those — no tool is ungated without a marker
         assert policy.SENSITIVITY_POLICY.ungated == frozenset(policy.UNGATED_TOOLS)
-
-
-class TestApprovalGate:
-    def test_gates_a_tool_the_policy_has_not_cleared(self):
-        # Given the SDK gate over a policy that clears only one read
-        gate = policy.approval_gate(policy.SensitivityPolicy(ungated=frozenset({"a_read"})))
-
-        # When an unclassified write tool is presented
-        needs_approval = gate(None, None, types.SimpleNamespace(name="a_write"))
-
-        # Then it must pause for approval — default-deny
-        assert needs_approval is True
-
-    def test_clears_a_tool_on_the_ungated_allowlist(self):
-        # Given the SDK gate over a policy that clears "a_read"
-        gate = policy.approval_gate(policy.SensitivityPolicy(ungated=frozenset({"a_read"})))
-
-        # When that cleared read is presented
-        needs_approval = gate(None, None, types.SimpleNamespace(name="a_read"))
-
-        # Then it runs without approval
-        assert needs_approval is False

@@ -1,16 +1,25 @@
 """
-MCP server construction (Streamable HTTP transport).
+MCP integrations (Streamable HTTP transport): declarative specs, server
+construction, and the wrapping of remote tools into ``FunctionTool``s.
+
+Each integration is an ``MCPSpec`` built into an ``MCPServerMount``. The
+agent never mounts the server object itself — ``MCPServerMount.function_tools``
+returns the remote tools as the same ``FunctionTool``s a local
+``@agents.function_tool`` produces, with ``needs_approval`` stamped per tool.
+Default-deny: any mounted tool not on ``spec.ungated_tools`` pauses for
+human approval, so a new server-side tool can never run ungated.
 
 Each integration is optional: when its URL is unset, ``config.py`` skips
-the server and the agent falls back to a local stub tool, so the full loop
+the mount and the agent falls back to a local stub tool, so the full loop
 still runs in dev with zero external dependencies.
 
-Servers must be ``connect()``-ed before the first run and ``cleanup()``-ed
-on shutdown — the FastAPI lifespan in ``interfaces/api.py`` owns that.
+Servers must be ``connect()``-ed before the first wrap and ``cleanup()``-ed
+on shutdown — the FastAPI lifespan in ``interfaces/app.py`` owns that.
 """
 
+import agents
+import attrs
 from agents import mcp as agents_mcp
-from agents.mcp import server as agents_mcp_server
 
 
 # Read-only enforcement (A1): the dev mcp-atlassian image ships write tools,
@@ -27,38 +36,69 @@ CONFLUENCE_READ_TOOLS = (
 )
 
 
-def build_confluence(*, url: str, token: str) -> agents_mcp.MCPServerStreamableHttp:
+@attrs.frozen
+class MCPSpec:
     """
-    Return the knowledge-base MCP server, filtered to read-only tools (A1).
+    Declarative description of one MCP integration: where the server is,
+    which of its tools may mount, and which mounted tools run without
+    human approval.
     """
-    return agents_mcp.MCPServerStreamableHttp(
-        params={"url": url, "headers": _auth_headers(token)},
-        name="confluence",
-        cache_tools_list=True,
-        tool_filter=agents_mcp.create_static_tool_filter(
-            allowed_tool_names=list(CONFLUENCE_READ_TOOLS),
+
+    name: str
+    url: str
+    token: str
+    # None = mount every tool the server offers.
+    allowed_tools: tuple[str, ...] | None = None
+    # Default-deny: any mounted tool NOT listed here pauses for approval.
+    ungated_tools: frozenset[str] = frozenset()
+
+
+@attrs.frozen
+class MCPServerMount:
+    """
+    A built MCP server paired with the spec that produced it.
+    """
+
+    spec: MCPSpec
+    server: agents_mcp.MCPServerStreamableHttp
+
+    async def function_tools(self) -> list[agents.FunctionTool]:
+        """
+        Return the server's tools wrapped as ``FunctionTool``s, each with
+        ``needs_approval`` set from the spec (default-deny). The server's
+        static tool filter applies before wrapping, so only
+        ``spec.allowed_tools`` can ever reach the agent.
+
+        :raises agents.exceptions.UserError: if the server is not connected
+            or the tool list cannot be fetched.
+        """
+        wrapped = []
+        for mcp_tool in await self.server.list_tools():
+            tool = agents_mcp.MCPUtil.to_function_tool(
+                mcp_tool, self.server, convert_schemas_to_strict=False
+            )
+            tool.needs_approval = mcp_tool.name not in self.spec.ungated_tools
+            wrapped.append(tool)
+        return wrapped
+
+
+def build_mount(*, spec: MCPSpec) -> MCPServerMount:
+    """
+    Return the mount for ``spec``: a Streamable HTTP server with the spec's
+    static tool filter installed, paired with the spec for wrapping.
+    """
+    return MCPServerMount(
+        spec=spec,
+        server=agents_mcp.MCPServerStreamableHttp(
+            params={"url": spec.url, "headers": _auth_headers(spec.token)},
+            name=spec.name,
+            cache_tools_list=True,
+            tool_filter=(
+                agents_mcp.create_static_tool_filter(allowed_tool_names=list(spec.allowed_tools))
+                if spec.allowed_tools is not None
+                else None
+            ),
         ),
-    )
-
-
-def build_sailpoint(
-    *,
-    url: str,
-    token: str,
-    require_approval: agents_mcp_server.RequireApprovalSetting,
-) -> agents_mcp.MCPServerStreamableHttp:
-    """
-    Return the identity/access MCP server, gated by the given per-tool
-    approval policy (2.6). ``require_approval`` is required — not defaulted —
-    so a caller can never accidentally mount SailPoint ungated: config passes
-    the default-deny sensitivity gate, which pauses every tool it has not
-    explicitly cleared.
-    """
-    return agents_mcp.MCPServerStreamableHttp(
-        params={"url": url, "headers": _auth_headers(token)},
-        name="sailpoint",
-        cache_tools_list=True,
-        require_approval=require_approval,
     )
 
 

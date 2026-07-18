@@ -22,6 +22,7 @@ from openai.types.responses import (
 from otto import config
 from otto.application import support
 from otto.domain.identity import users
+from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals, entities
 from otto.settings import Settings
 from otto.vendors import slack as slack_vendor
@@ -172,6 +173,7 @@ def wire(monkeypatch):
             model=model,
             confluence_mcp=None,
             sailpoint_mcp=None,
+            agent=support_agent.build_agent(model=model),
         )
         monkeypatch.setattr(config, "get_config", lambda: cfg)
         return cfg, gateway, model

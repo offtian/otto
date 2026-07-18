@@ -1,14 +1,16 @@
 """
 The Otto agent: instructions, capability tools, and the per-request context
-they read. Stub tools mount only when the matching MCP server is not
-configured, so the full loop runs in dev with zero external dependencies.
+they read. MCP-backed capabilities arrive pre-wrapped as ``FunctionTool``s
+(``vendors.mcp.MCPServerMount.function_tools``); a stub tool mounts only when
+the matching capability is not supplied, so the full loop runs in dev with
+zero external dependencies.
 """
 
 import pathlib
+from collections.abc import Sequence
 
 import agents
 import attrs
-from agents import mcp as agents_mcp
 from agents.models import interface as model_interface
 
 from otto.domain.support import escalation
@@ -151,22 +153,20 @@ async def escalate_to_human(
 def build_agent(
     *,
     model: model_interface.Model,
-    confluence_mcp: agents_mcp.MCPServerStreamableHttp | None = None,
-    sailpoint_mcp: agents_mcp.MCPServerStreamableHttp | None = None,
+    confluence_tools: Sequence[agents.Tool] | None = None,
+    sailpoint_tools: Sequence[agents.Tool] | None = None,
 ) -> agents.Agent[SupportContext]:
     """
-    Return the Otto agent wired to the given model, with stub tools filling
-    in for any MCP server that is not configured.
+    Return the Otto agent wired to the given model. Each MCP capability
+    arrives as pre-wrapped, per-tool-gated ``FunctionTool``s; None mounts
+    the local stub tool instead.
     """
     tools: list[agents.Tool] = [list_runbooks, read_runbook, escalate_to_human]
-    if confluence_mcp is None:
-        tools.append(search_knowledge)
-    if sailpoint_mcp is None:
-        tools.append(submit_access_request)
+    tools.extend(confluence_tools if confluence_tools is not None else (search_knowledge,))
+    tools.extend(sailpoint_tools if sailpoint_tools is not None else (submit_access_request,))
     return agents.Agent(
         name="Otto",
         instructions=INSTRUCTIONS,
         model=model,
         tools=tools,
-        mcp_servers=[server for server in (confluence_mcp, sailpoint_mcp) if server is not None],
     )

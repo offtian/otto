@@ -1,6 +1,6 @@
 """
 Per-tool sensitivity policy (2.6): which tool calls must pause for a human
-approval before they run, and the Agents-SDK approval gate built from it.
+approval before they run.
 
 **Default-deny.** ``is_sensitive`` returns True for every tool the policy does
 not explicitly clear, so a newly-mounted tool — a new SailPoint action, a Jira
@@ -9,14 +9,12 @@ transition (D10) — is gated until someone deliberately adds it to
 reviewed, marked change: the policy test fails CI on an ungated entry that
 carries no marker ("policy changes may only widen the gated set").
 
-``approval_gate`` adapts the policy to the SDK per-tool approval callback so the
-composition root only has to wire the resulting callable. We build a callable,
-never the SDK's dict form, which defaults *unlisted* tools to ungated — the
-silent un-gate this policy exists to forbid.
+The policy is enforced at wrap time: ``config.py`` feeds ``SENSITIVITY_POLICY``
+into the SailPoint ``MCPSpec``, and ``vendors.mcp.MCPServerMount.function_tools``
+stamps ``needs_approval`` onto every wrapped tool from it — never the SDK's
+dict form, which defaults *unlisted* tools to ungated, the silent un-gate this
+policy exists to forbid.
 """
-
-from collections.abc import Callable
-from typing import Any
 
 import attrs
 
@@ -55,18 +53,4 @@ class SensitivityPolicy:
         return tool_name not in self.ungated
 
 
-def approval_gate(policy: SensitivityPolicy) -> Callable[[Any, Any, Any], bool]:
-    """
-    Return an Agents-SDK per-tool approval callback for ``policy``: the SDK
-    invokes it as ``(run_context, agent, tool)`` for each mounted tool, and it
-    pauses (returns True) for anything the policy has not explicitly cleared.
-    """
-
-    def _requires_approval(run_context: Any, agent: Any, tool: Any) -> bool:
-        return policy.is_sensitive(tool.name)
-
-    return _requires_approval
-
-
 SENSITIVITY_POLICY = SensitivityPolicy(ungated=frozenset(UNGATED_TOOLS))
-SENSITIVITY_GATE = approval_gate(SENSITIVITY_POLICY)

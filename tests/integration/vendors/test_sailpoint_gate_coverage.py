@@ -1,8 +1,9 @@
 """
-Gate-coverage (2.4): connect to the running mock SailPoint MCP, list the tools
-it *actually* mounts, and assert the 2.6 sensitivity policy pauses every write
-and clears every read. The project's worst-failure guard — a write slipping
-past approval — checked against the real tool list, not assumptions.
+Gate-coverage (2.4): connect to the running mock SailPoint MCP, wrap the tools
+it *actually* mounts, and assert ``needs_approval`` — the operative flag on
+every wrapped FunctionTool — pauses every write and clears every read. The
+project's worst-failure guard — a write slipping past approval — checked
+against the real tool list, not assumptions.
 
 Live: needs the mock (`docker compose --profile sailpoint up`, or
 `uv run python dev/sailpoint_mock.py`). Guarded by RUN_INTEGRATION; run via
@@ -36,36 +37,41 @@ EXPECTED_READS = {"search_entitlements", "list_identity_access", "list_access_re
 
 
 @pytest.fixture
-async def mounted_tool_names():
-    # Build the sailpoint server exactly as config does (2.6 gate wired in) and
-    # ask it for the tools it really exposes.
-    server = mcp_vendor.build_sailpoint(
-        url=SAILPOINT_URL, token="", require_approval=policy.SENSITIVITY_GATE
+async def approval_by_tool_name():
+    # Build the sailpoint mount exactly as config does (2.6 policy wired in)
+    # and wrap the tools it really exposes.
+    mount = mcp_vendor.build_mount(
+        spec=mcp_vendor.MCPSpec(
+            name="sailpoint",
+            url=SAILPOINT_URL,
+            token="",
+            ungated_tools=policy.SENSITIVITY_POLICY.ungated,
+        )
     )
-    await server.connect()
+    await mount.server.connect()
     try:
-        tools = await server.list_tools()
+        tools = await mount.function_tools()
     finally:
-        await server.cleanup()
-    return {tool.name for tool in tools}
+        await mount.server.cleanup()
+    return {tool.name: tool.needs_approval for tool in tools}
 
 
 class TestSailpointGateCoverage:
-    async def test_no_mounted_tool_is_silently_ungated(self, mounted_tool_names):
-        # Given every tool the mock actually mounts
-        assert mounted_tool_names, "mock exposed no tools — is it running?"
+    async def test_no_mounted_tool_is_silently_ungated(self, approval_by_tool_name):
+        # Given every tool the mock actually mounts, wrapped as the agent sees it
+        assert approval_by_tool_name, "mock exposed no tools — is it running?"
 
         # When each tool that is not an explicitly cleared read is checked
         # Then it is gated — default-deny, so a write can never slip past approval
-        for name in mounted_tool_names:
+        for name, needs_approval in approval_by_tool_name.items():
             if name not in EXPECTED_READS:
-                assert policy.SENSITIVITY_POLICY.is_sensitive(name) is True, name
+                assert needs_approval is True, name
 
-    async def test_cleared_reads_run_without_approval(self, mounted_tool_names):
+    async def test_cleared_reads_run_without_approval(self, approval_by_tool_name):
         # Given the mounted read tools
-        reads = mounted_tool_names & EXPECTED_READS
+        reads = set(approval_by_tool_name) & EXPECTED_READS
         assert reads, "expected the mock to mount the cleared read tools"
 
         # When each is checked
         # Then it runs without approval — reads flow freely (the 2.4 read un-gate)
-        assert not any(policy.SENSITIVITY_POLICY.is_sensitive(name) for name in reads)
+        assert not any(approval_by_tool_name[name] for name in reads)

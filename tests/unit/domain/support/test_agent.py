@@ -1,6 +1,7 @@
 import json
 import pathlib
 
+import agents
 from agents import tool_context
 
 from otto.domain.support import agent as support_agent
@@ -126,3 +127,35 @@ class TestBuildAgent:
             "submit_access_request",
         }
         assert agent.mcp_servers == []
+
+    def test_mounts_supplied_mcp_tools_instead_of_stubs(self):
+        # Given pre-wrapped MCP tools for both capabilities
+        confluence_search = _wrapped_tool("confluence_search")
+        submit_request = _wrapped_tool("submit_access_request")
+
+        # When the agent is built with them
+        agent = support_agent.build_agent(
+            model="stub-model",
+            confluence_tools=[confluence_search],
+            sailpoint_tools=[submit_request],
+        )
+
+        # Then the wrapped tools mount and no stub sneaks in beside them
+        tool_names = {tool.name for tool in agent.tools}
+        assert tool_names == {
+            "list_runbooks",
+            "read_runbook",
+            "escalate_to_human",
+            "confluence_search",
+            "submit_access_request",
+        }
+        assert "search_knowledge" not in tool_names
+
+
+def _wrapped_tool(name: str) -> agents.FunctionTool:
+    async def invoke(tool_run_context, args):
+        return ""
+
+    return agents.FunctionTool(
+        name=name, description="", params_json_schema={}, on_invoke_tool=invoke
+    )

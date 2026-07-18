@@ -107,7 +107,9 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
     telemetry.instrument_app(started_app)
     if cfg.settings.database_url:
         await data_db.connect_db()  # durable approval store (Phase 2)
-    servers = [s for s in (cfg.confluence_mcp, cfg.sailpoint_mcp) if s is not None]
+    servers = [
+        mount.server for mount in (cfg.confluence_mcp, cfg.sailpoint_mcp) if mount is not None
+    ]
     connected: list[agents_mcp.MCPServerStreamableHttp] = []
     for server in servers:
         try:
@@ -119,6 +121,9 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
             logs.log_exception(exc, params={"mcp_connect": type(server).__name__})
             continue
         connected.append(server)
+    # After connect on purpose: wiring the agent pulls each mount's tool list
+    # over its live connection (a failed mount degrades to its stub tool).
+    await cfg.load_agents()
     # Approval maintenance sweep (2.5): only meaningful against the durable
     # store, and the interval is a kill switch (0 = off).
     sweep_task: asyncio.Task[None] | None = None

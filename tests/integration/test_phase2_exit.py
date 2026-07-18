@@ -130,9 +130,15 @@ async def wired(monkeypatch):
     db = databases.Database(DB_URL)
     await db.connect()
     await db.execute("DELETE FROM approvals")
-    mock = mcp_vendor.build_sailpoint(
-        url=SAILPOINT_URL, token="", require_approval=policy.SENSITIVITY_GATE
+    mount = mcp_vendor.build_mount(
+        spec=mcp_vendor.MCPSpec(
+            name="sailpoint",
+            url=SAILPOINT_URL,
+            token="",
+            ungated_tools=policy.SENSITIVITY_POLICY.ungated,
+        )
     )
+    mock = mount.server
     await mock.connect()
     total = APPROVE + DENY + EXPIRE
     # total pauses, then one resume turn per resolved (approve+deny) request.
@@ -152,8 +158,9 @@ async def wired(monkeypatch):
         approvals=approvals.PostgresApprovalStore(database=db),
         model=model,
         confluence_mcp=None,
-        sailpoint_mcp=mock,
+        sailpoint_mcp=mount,
     )
+    await cfg.load_agents()  # mock already connected — wires the gated tools
     monkeypatch.setattr(config, "get_config", lambda: cfg)
     try:
         yield cfg, mock

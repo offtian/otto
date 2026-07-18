@@ -1,7 +1,21 @@
+from unittest import mock
+
+import agents
+from mcp import types as mcp_types
+
 from otto.vendors import mcp
 
 
 WRITE_VERBS = ("create", "update", "delete", "add", "remove", "put", "post", "write", "move")
+
+
+def _spec(**overrides):
+    fields = {"name": "sailpoint", "url": "http://mcp.local", "token": "t", **overrides}
+    return mcp.MCPSpec(**fields)
+
+
+def _remote_tool(name: str) -> mcp_types.Tool:
+    return mcp_types.Tool(name=name, inputSchema={"type": "object", "properties": {}})
 
 
 class TestConfluenceReadOnly:
@@ -15,27 +29,45 @@ class TestConfluenceReadOnly:
         # Then no write-capable tool can ever mount
         assert offenders == []
 
-    def test_build_confluence_applies_the_allowlist_filter(self):
-        # Given a Confluence MCP server built by the vendor factory
-        server = mcp.build_confluence(url="http://mcp.local", token="t")
 
-        # When the configured tool filter is inspected
-        tool_filter = server.tool_filter
+class TestBuildMount:
+    def test_installs_the_static_allowlist_filter_when_allowed_tools_is_set(self):
+        # Given a spec restricted to the Confluence read tools
+        spec = _spec(name="confluence", allowed_tools=mcp.CONFLUENCE_READ_TOOLS)
 
-        # Then it statically allows exactly the read-only tool names
-        assert tool_filter == {"allowed_tool_names": list(mcp.CONFLUENCE_READ_TOOLS)}
+        # When the mount is built
+        mount = mcp.build_mount(spec=spec)
+
+        # Then the server statically allows exactly those tool names
+        assert mount.server.tool_filter == {"allowed_tool_names": list(mcp.CONFLUENCE_READ_TOOLS)}
+
+    def test_mounts_every_server_tool_when_allowed_tools_is_none(self):
+        # Given a spec with no allowlist (SailPoint mounts all, gated by approval)
+        spec = _spec(allowed_tools=None)
+
+        # When the mount is built
+        mount = mcp.build_mount(spec=spec)
+
+        # Then no tool filter is installed
+        assert mount.server.tool_filter is None
 
 
-class TestSailpointGate:
-    def test_build_sailpoint_installs_the_supplied_per_tool_gate(self):
-        # Given a per-tool approval gate (the 2.6 default-deny callable)
-        def gate(run_context, agent, tool):
-            return tool.name != "some_read"
+class TestFunctionTools:
+    async def test_wraps_remote_tools_and_gates_all_but_the_ungated_allowlist(self):
+        # Given a mount whose server offers one cleared read and one write
+        mount = mcp.build_mount(spec=_spec(ungated_tools=frozenset({"a_read"})))
+        remote_tools = [_remote_tool("a_read"), _remote_tool("a_write")]
 
-        # When a SailPoint server is built with it
-        server = mcp.build_sailpoint(url="http://mcp.local", token="t", require_approval=gate)
+        # When the tools are wrapped as FunctionTools
+        with mock.patch.object(
+            mount.server, "list_tools", mock.AsyncMock(return_value=remote_tools)
+        ):
+            wrapped = await mount.function_tools()
 
-        # Then the SDK holds exactly that callable — no blanket override slipped
-        # in (a callable is stored verbatim; a "always" string would normalize
-        # to a bool, so this also guards against a regression to blanket gating)
-        assert server._needs_approval_policy is gate
+        # Then every tool is a FunctionTool and only the unlisted one is gated
+        # — default-deny, so a new server-side tool can never run ungated
+        assert all(isinstance(tool, agents.FunctionTool) for tool in wrapped)
+        assert {tool.name: tool.needs_approval for tool in wrapped} == {
+            "a_read": False,
+            "a_write": True,
+        }

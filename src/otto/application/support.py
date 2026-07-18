@@ -29,7 +29,7 @@ async def handle_support_request(*, request: entities.SupportRequest) -> None:
     cfg = config.get_config()
     await _begin_thinking(origin=request.origin, cfg=cfg)
     result = await agents.Runner.run(
-        _build_agent(cfg),
+        cfg.agent,
         await _conversation_input(request=request, cfg=cfg),
         context=_build_context(
             requester_id=request.user_id,
@@ -306,14 +306,6 @@ async def sweep_approvals(*, now: datetime) -> None:
     )
 
 
-def _build_agent(cfg: config.Configuration) -> agents.Agent[support_agent.SupportContext]:
-    return support_agent.build_agent(
-        model=cfg.model,
-        confluence_mcp=cfg.confluence_mcp,
-        sailpoint_mcp=cfg.sailpoint_mcp,
-    )
-
-
 def _build_context(
     *,
     requester_id: str,
@@ -479,13 +471,12 @@ async def _resume_run(
     approved: bool,
     cfg: config.Configuration,
 ) -> agents.RunResult:
-    agent = _build_agent(cfg)
     # The context must be re-supplied via from_string, NOT via Runner.run:
     # a context passed to run() replaces the state's context wrapper, which
     # is where approve()/reject() decisions are recorded — the run would
     # re-interrupt forever.
     state = await agents.RunState.from_string(
-        agent,
+        cfg.agent,
         pending.run_state_json,
         context_override=agents.RunContextWrapper(
             context=_build_context(
@@ -500,7 +491,7 @@ async def _resume_run(
             state.approve(interruption)
         else:
             state.reject(interruption)
-    return await agents.Runner.run(agent, state)
+    return await agents.Runner.run(cfg.agent, state)
 
 
 async def _may_resolve(
