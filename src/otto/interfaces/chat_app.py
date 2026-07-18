@@ -12,6 +12,7 @@ import pathlib
 import agents
 import logfire
 import streamlit as st
+from opentelemetry import trace as otel_trace
 
 from otto.domain.support import agent as support_agent
 from otto.settings import settings
@@ -31,20 +32,24 @@ class _NoopTicketBackend:
         return "streamlit-escalation-1"
 
 
+# Module scope so it precedes the first chat_turn span (idempotent across
+# Streamlit reruns via the _configured guard).
+telemetry.setup_telemetry(
+    service_name=settings.otel_service_name,
+    environment=settings.environment,
+    logfire_token=settings.logfire_token,
+    otlp_endpoint=settings.otlp_endpoint,
+    langfuse_host=settings.langfuse_host,
+    langfuse_public_key=settings.langfuse_public_key,
+    langfuse_secret_key=settings.langfuse_secret_key,
+)
+
+
 def _build() -> tuple[agents.Agent[support_agent.SupportContext], support_agent.SupportContext]:
     """
     Build the agent + context fresh per interaction: the AsyncOpenAI client
     binds to the current event loop, and each asyncio.run() uses a new one.
     """
-    telemetry.setup_telemetry(
-        service_name=settings.otel_service_name,
-        environment=settings.environment,
-        logfire_token=settings.logfire_token,
-        otlp_endpoint=settings.otlp_endpoint,
-        langfuse_host=settings.langfuse_host,
-        langfuse_public_key=settings.langfuse_public_key,
-        langfuse_secret_key=settings.langfuse_secret_key,
-    )
     model = llm.build_model(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
@@ -87,7 +92,32 @@ async def _resume(state_json: str, *, approved: bool) -> agents.RunResult:
     return await agents.Runner.run(agent, state)
 
 
+def _steps(result: agents.RunResult) -> tuple[str, ...]:
+    """
+    Return the agent's visible thinking process for one run: tool calls with
+    their arguments, tool results, and any reasoning items the model surfaces
+    (qwen via Ollama's chat-completions API keeps chain-of-thought private,
+    so reasoning shows up only on transports that expose it).
+    """
+    lines = []
+    for item in result.new_items:
+        raw = item.raw_item
+        if isinstance(item, agents.ReasoningItem):
+            summary = " ".join(part.text for part in getattr(raw, "summary", []) or [])
+            lines.append(f":material/psychology: {summary}")
+        elif isinstance(item, agents.ToolCallItem):
+            name = getattr(raw, "name", "tool")
+            lines.append(f":material/build: `{name}({getattr(raw, 'arguments', '')})`")
+        elif isinstance(item, agents.ToolCallOutputItem):
+            lines.append(f":material/output: {item.output}")
+    return tuple(lines)
+
+
 def _absorb(result: agents.RunResult) -> None:
+    steps = _steps(result)
+    # The UI-visible thinking bundle rides the enclosing chat-turn span, so
+    # the trace shows exactly what the user saw.
+    otel_trace.get_current_span().set_attribute("otto.thinking_steps", list(steps))
     st.session_state.input_items = result.to_input_list()
     if result.interruptions:
         raw = result.interruptions[0].raw_item
@@ -95,12 +125,20 @@ def _absorb(result: agents.RunResult) -> None:
             "state_json": result.to_state().to_string(),
             "tool": getattr(raw, "name", "tool"),
             "args": getattr(raw, "arguments", ""),
+            "steps": steps,
         }
     else:
         st.session_state.pending = None
-        st.session_state.history.append(("assistant", str(result.final_output)))
+        st.session_state.history.append(
+            {"role": "assistant", "content": str(result.final_output), "steps": steps}
+        )
     logfire.force_flush()  # make the trace visible in Tempo/Langfuse right away
 
+
+if "history" in st.session_state and any(
+    not isinstance(message, dict) for message in st.session_state.history
+):
+    st.session_state.clear()  # session predates a hot-reloaded schema change
 
 if "input_items" not in st.session_state:
     st.session_state.input_items = []
@@ -126,23 +164,32 @@ _EXAMPLES = (
 with st.sidebar:
     st.subheader("Example questions")
     for _example in _EXAMPLES:
-        if st.button(_example, use_container_width=True, disabled=bool(st.session_state.pending)):
+        if st.button(_example, width="stretch", disabled=bool(st.session_state.pending)):
             st.session_state.queued_question = _example
 
-for role, text in st.session_state.history:
-    st.chat_message(role).write(text)
+for message in st.session_state.history:
+    with st.chat_message(message["role"]):
+        if message.get("steps"):
+            with st.expander(":material/psychology: Thinking process"):
+                for step in message["steps"]:
+                    st.markdown(step)
+        st.write(message["content"])
 
 if st.session_state.pending:
     pending = st.session_state.pending
     with st.chat_message("assistant"):
+        if pending["steps"]:
+            with st.expander(":material/psychology: Thinking process", expanded=True):
+                for step in pending["steps"]:
+                    st.markdown(step)
         st.warning(f"Human approval required: `{pending['tool']}({pending['args']})`")
         approve_col, reject_col = st.columns(2)
         if approve_col.button("Approve", type="primary"):
-            with st.spinner("Resuming…"):
+            with st.spinner("Resuming…"), logfire.span("chat_approval", approved=True):
                 _absorb(asyncio.run(_resume(pending["state_json"], approved=True)))
             st.rerun()
         if reject_col.button("Reject"):
-            with st.spinner("Resuming…"):
+            with st.spinner("Resuming…"), logfire.span("chat_approval", approved=False):
                 _absorb(asyncio.run(_resume(pending["state_json"], approved=False)))
             st.rerun()
 
@@ -150,8 +197,8 @@ question = st.chat_input(
     "Ask Otto…", disabled=bool(st.session_state.pending)
 ) or st.session_state.pop("queued_question", None)
 if question:
-    st.session_state.history.append(("user", question))
+    st.session_state.history.append({"role": "user", "content": question})
     st.chat_message("user").write(question)
-    with st.spinner("Otto is thinking…"):
+    with st.spinner("Otto is thinking…"), logfire.span("chat_turn", question=question):
         _absorb(asyncio.run(_run_turn(question)))
     st.rerun()
