@@ -8,7 +8,6 @@ module is only imported by `streamlit run` (just chat), never by the app.
 
 import asyncio
 import pathlib
-import uuid
 
 import agents
 import logfire
@@ -44,6 +43,7 @@ telemetry.setup_telemetry(
     langfuse_public_key=settings.langfuse_public_key,
     langfuse_secret_key=settings.langfuse_secret_key,
 )
+_tracer = otel_trace.get_tracer("otto.chat_app")
 
 
 def _build() -> tuple[agents.Agent[support_agent.SupportContext], support_agent.SupportContext]:
@@ -116,13 +116,9 @@ def _steps(result: agents.RunResult) -> tuple[str, ...]:
 
 def _absorb(result: agents.RunResult) -> None:
     steps = _steps(result)
-    # Both ride the enclosing chat_turn/chat_approval span: the thinking
-    # bundle so the trace shows exactly what the user saw, and the Langfuse
-    # session id so all turns of one Streamlit chat group into one session
-    # (each root span is otherwise its own trace).
-    span = otel_trace.get_current_span()
-    span.set_attribute("otto.thinking_steps", list(steps))
-    span.set_attribute("langfuse.session.id", st.session_state.chat_session_id)
+    # The UI-visible thinking bundle rides the enclosing chat_turn/chat_approval
+    # span, so the trace shows exactly what the user saw.
+    otel_trace.get_current_span().set_attribute("otto.thinking_steps", list(steps))
     st.session_state.input_items = result.to_input_list()
     if result.interruptions:
         raw = result.interruptions[0].raw_item
@@ -149,8 +145,15 @@ if "input_items" not in st.session_state:
     st.session_state.input_items = []
     st.session_state.history = []
     st.session_state.pending = None
-if "chat_session_id" not in st.session_state:  # own guard: survives hot-reloads
-    st.session_state.chat_session_id = f"streamlit-{uuid.uuid4().hex[:8]}"
+if "chat_trace_context" not in st.session_state:  # own guard: survives hot-reloads
+    # One trace per conversation: a root span opened (and ended) at chat
+    # start; its context parents every chat_turn/chat_approval span, so the
+    # whole history lands in a single trace. "New chat" clears session state,
+    # which mints the next root — no session-id attribute involved (Logfire's
+    # scrubber redacts anything matching "session" before export).
+    _root = _tracer.start_span("chat")
+    _root.end()
+    st.session_state.chat_trace_context = otel_trace.set_span_in_context(_root)
 
 st.title("Otto — dev chat")
 st.caption(
@@ -182,6 +185,9 @@ _EXAMPLES = {
     ),
 }
 with st.sidebar:
+    if st.button(":material/add_comment: New chat", width="stretch"):
+        st.session_state.clear()  # next run re-inits, incl. a fresh trace root
+        st.rerun()
     st.subheader("Example questions")
     for _group, _questions in _EXAMPLES.items():
         st.caption(_group)
@@ -223,11 +229,25 @@ if st.session_state.pending:
         st.warning(f"Human approval required: `{pending['tool']}({pending['args']})`")
         approve_col, reject_col = st.columns(2)
         if approve_col.button("Approve", type="primary"):
-            with st.spinner("Resuming…"), logfire.span("chat_approval", approved=True):
+            with (
+                st.spinner("Resuming…"),
+                _tracer.start_as_current_span(
+                    "chat_approval",
+                    context=st.session_state.chat_trace_context,
+                    attributes={"approved": True},
+                ),
+            ):
                 _absorb(asyncio.run(_resume(pending["state_json"], approved=True)))
             st.rerun()
         if reject_col.button("Reject"):
-            with st.spinner("Resuming…"), logfire.span("chat_approval", approved=False):
+            with (
+                st.spinner("Resuming…"),
+                _tracer.start_as_current_span(
+                    "chat_approval",
+                    context=st.session_state.chat_trace_context,
+                    attributes={"approved": False},
+                ),
+            ):
                 _absorb(asyncio.run(_resume(pending["state_json"], approved=False)))
             st.rerun()
 
@@ -237,6 +257,13 @@ question = st.chat_input(
 if question:
     st.session_state.history.append({"role": "user", "content": question})
     st.chat_message("user").write(question)
-    with st.spinner("Otto is thinking…"), logfire.span("chat_turn", question=question):
+    with (
+        st.spinner("Otto is thinking…"),
+        _tracer.start_as_current_span(
+            "chat_turn",
+            context=st.session_state.chat_trace_context,
+            attributes={"question": question},
+        ),
+    ):
         _absorb(asyncio.run(_run_turn(question)))
     st.rerun()
