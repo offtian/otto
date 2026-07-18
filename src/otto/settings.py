@@ -76,6 +76,13 @@ class Settings(BaseSettings):
     otlp_endpoint: str = ""  # e.g. http://localhost:4318
     logfire_token: str = ""
 
+    # Langfuse (LLM observability): all three set = agent traces also export
+    # to its OTLP ingestion endpoint. Self-hosted via `--profile langfuse`
+    # (dev keys pk-lf-otto-dev / sk-lf-otto-dev, see compose.yml) or Cloud.
+    langfuse_host: str = ""  # e.g. http://localhost:3000
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+
     # MCP integrations (Streamable HTTP). An empty URL means the capability
     # runs on its local stub tool so the agent still works end-to-end in dev.
     confluence_mcp_url: str = ""

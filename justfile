@@ -39,9 +39,9 @@ run:
 infra:
     docker compose up -d
 
-# Start the full dev stack (+ LLM gateway, Confluence + SailPoint MCP, app)
+# Start the full dev stack (+ LLM gateway, Confluence + SailPoint MCP, Langfuse, app)
 stack:
-    docker compose --profile gateway --profile mcp --profile sailpoint --profile app up -d --build
+    docker compose --profile gateway --profile mcp --profile sailpoint --profile langfuse --profile app up -d --build
 
 # Expose the app publicly for Slack and tail the URL
 tunnel:

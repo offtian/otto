@@ -100,6 +100,9 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
         environment=cfg.settings.environment,
         logfire_token=cfg.settings.logfire_token,
         otlp_endpoint=cfg.settings.otlp_endpoint,
+        langfuse_host=cfg.settings.langfuse_host,
+        langfuse_public_key=cfg.settings.langfuse_public_key,
+        langfuse_secret_key=cfg.settings.langfuse_secret_key,
     )
     telemetry.instrument_app(started_app)
     if cfg.settings.database_url:

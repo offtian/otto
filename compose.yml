@@ -3,6 +3,7 @@
 #   docker compose up -d                                  # infra: Postgres + Jaeger
 #   docker compose --profile gateway --profile mcp up -d  # + LLM gateway + Confluence MCP
 #   docker compose --profile app up -d --build            # + containerized Otto
+#   docker compose --profile langfuse up -d               # + Langfuse UI (http://localhost:3000)
 #   docker compose --profile tunnel up -d                 # + public URL for Slack (see logs)
 #
 # The app usually runs on the host (`just run`) against these services;
@@ -87,6 +88,125 @@ services:
     ports:
       - "9100:9100"
 
+  # --- Langfuse LLM observability (profile: langfuse) ------------------------
+  # Self-hosted Langfuse v3 (UI: http://localhost:3000). The app already emits
+  # OpenAI Agents spans over OTLP; Langfuse ingests them natively — enable by
+  # adding to .env (keys match the headless init below):
+  #   LANGFUSE_HOST=http://localhost:3000
+  #   LANGFUSE_PUBLIC_KEY=pk-lf-otto-dev
+  #   LANGFUSE_SECRET_KEY=sk-lf-otto-dev
+  # UI login: dev@otto.local / otto-dev-password. v3 requires its own
+  # Postgres + ClickHouse + Redis + MinIO; all backing stores are
+  # internal-only (no host ports) so they can't collide with the core stack
+  # (5432, 9000, 6379). Dev-only credentials throughout.
+
+  langfuse-web:
+    profiles: ["langfuse"]
+    image: langfuse/langfuse:3
+    depends_on: &langfuse-depends-on
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/postgres
+      SALT: otto-dev-salt
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      # Single-node ClickHouse — the image default (true) demands Zookeeper.
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto  # required — AWS SDK errors without one
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      REDIS_HOST: langfuse-redis
+      REDIS_AUTH: langfuse-dev
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: otto-dev-secret
+      # Headless init: seed org/project/user so the dev keys above work
+      # without any UI clicking. Web-only vars; the worker ignores them.
+      LANGFUSE_INIT_ORG_ID: otto
+      LANGFUSE_INIT_PROJECT_ID: otto
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-otto-dev
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-otto-dev
+      LANGFUSE_INIT_USER_EMAIL: dev@otto.local
+      LANGFUSE_INIT_USER_PASSWORD: otto-dev-password
+    ports:
+      - "3000:3000"
+
+  langfuse-worker:
+    profiles: ["langfuse"]
+    image: langfuse/langfuse-worker:3
+    depends_on: *langfuse-depends-on
+    environment: *langfuse-env
+
+  langfuse-postgres:
+    profiles: ["langfuse"]
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - langfuse-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  langfuse-clickhouse:
+    profiles: ["langfuse"]
+    image: clickhouse/clickhouse-server:24.8
+    user: "101:101"
+    environment:
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  langfuse-redis:
+    profiles: ["langfuse"]
+    image: redis:7
+    command: ["--requirepass", "langfuse-dev", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  langfuse-minio:
+    profiles: ["langfuse"]
+    image: minio/minio
+    # Create the bucket before starting so the S3 env above always resolves.
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    volumes:
+      - langfuse-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 3s
+
   # --- Otto itself (profile: app) --------------------------------------------
 
   app:
@@ -106,6 +226,9 @@ services:
       CONFLUENCE_MCP_URL: ${CONFLUENCE_URL:+http://mcp-confluence:9000/mcp}
       # Only reachable when the `sailpoint` profile is also up.
       SAILPOINT_MCP_URL: http://mcp-sailpoint:9100/mcp
+      # Langfuse rides the Confluence trick: rewired to the in-network host
+      # only when .env opted in by setting the keys (which flow via env_file).
+      LANGFUSE_HOST: ${LANGFUSE_PUBLIC_KEY:+http://langfuse-web:3000}
     ports:
       - "8000:8000"
     depends_on:
@@ -132,3 +255,6 @@ services:
 
 volumes:
   postgres-data:
+  langfuse-postgres-data:
+  langfuse-clickhouse-data:
+  langfuse-minio-data:

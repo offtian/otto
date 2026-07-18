@@ -1,16 +1,21 @@
 """
 Telemetry bootstrap: Logfire as the OpenTelemetry SDK + instrumentation layer.
 
-Spans flow to two independent sinks — enable either, both, or neither:
+Spans flow to independent sinks — enable any subset:
 
 - Logfire (best UI for OpenAI Agents SDK traces) when a token is provided
 - any OTLP collector (Jaeger in dev, the firm APM in prod) when an
   endpoint is provided
+- Langfuse via its native OTLP ingestion endpoint when a host + key pair
+  is provided — no Langfuse SDK needed, which would double-instrument the
+  agent spans next to Logfire
 
 ``logfire.instrument_openai_agents()`` captures every agent run, tool call
 and LLM generation; FastAPI requests are instrumented per-app via
 ``instrument_app``.
 """
+
+import base64
 
 import logfire
 from opentelemetry.exporter.otlp.proto.http import trace_exporter
@@ -26,6 +31,9 @@ def setup_telemetry(
     environment: str,
     logfire_token: str,
     otlp_endpoint: str,
+    langfuse_host: str = "",
+    langfuse_public_key: str = "",
+    langfuse_secret_key: str = "",
 ) -> None:
     """
     Configure tracing for the process. Idempotent — safe to call from both
@@ -35,6 +43,9 @@ def setup_telemetry(
     :param environment: deployment environment tag (dev/staging/prod).
     :param logfire_token: Logfire write token; empty disables the Logfire sink.
     :param otlp_endpoint: OTLP/HTTP collector base URL; empty disables OTLP.
+    :param langfuse_host: Langfuse base URL; empty disables the Langfuse sink.
+    :param langfuse_public_key: Langfuse project public key (``pk-lf-...``).
+    :param langfuse_secret_key: Langfuse project secret key (``sk-lf-...``).
     """
     global _configured  # noqa: PLW0603
     if _configured:
@@ -47,6 +58,15 @@ def setup_telemetry(
             endpoint=f"{otlp_endpoint.rstrip('/')}/v1/traces",
         )
         additional_processors.append(trace_export.BatchSpanProcessor(exporter))
+    if langfuse_host and langfuse_public_key and langfuse_secret_key:
+        credentials = base64.b64encode(
+            f"{langfuse_public_key}:{langfuse_secret_key}".encode()
+        ).decode()
+        langfuse_exporter = trace_exporter.OTLPSpanExporter(
+            endpoint=f"{langfuse_host.rstrip('/')}/api/public/otel/v1/traces",
+            headers={"Authorization": f"Basic {credentials}"},
+        )
+        additional_processors.append(trace_export.BatchSpanProcessor(langfuse_exporter))
 
     logfire.configure(
         service_name=service_name,
