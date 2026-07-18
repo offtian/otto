@@ -8,6 +8,7 @@ module is only imported by `streamlit run` (just chat), never by the app.
 
 import asyncio
 import pathlib
+import uuid
 
 import agents
 import logfire
@@ -115,9 +116,13 @@ def _steps(result: agents.RunResult) -> tuple[str, ...]:
 
 def _absorb(result: agents.RunResult) -> None:
     steps = _steps(result)
-    # The UI-visible thinking bundle rides the enclosing chat-turn span, so
-    # the trace shows exactly what the user saw.
-    otel_trace.get_current_span().set_attribute("otto.thinking_steps", list(steps))
+    # Both ride the enclosing chat_turn/chat_approval span: the thinking
+    # bundle so the trace shows exactly what the user saw, and the Langfuse
+    # session id so all turns of one Streamlit chat group into one session
+    # (each root span is otherwise its own trace).
+    span = otel_trace.get_current_span()
+    span.set_attribute("otto.thinking_steps", list(steps))
+    span.set_attribute("langfuse.session.id", st.session_state.chat_session_id)
     st.session_state.input_items = result.to_input_list()
     if result.interruptions:
         raw = result.interruptions[0].raw_item
@@ -144,6 +149,8 @@ if "input_items" not in st.session_state:
     st.session_state.input_items = []
     st.session_state.history = []
     st.session_state.pending = None
+if "chat_session_id" not in st.session_state:  # own guard: survives hot-reloads
+    st.session_state.chat_session_id = f"streamlit-{uuid.uuid4().hex[:8]}"
 
 st.title("Otto — dev chat")
 st.caption(
