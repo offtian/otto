@@ -145,7 +145,7 @@ jira-fire-all: (jira-fire "question-vpn.json") (jira-fire "access-snowflake.json
 # Prove the agent works end-to-end (model + Agents SDK + tracing), no HTTP.
 # Usage: just agent-smoke  |  just agent-smoke "I need Snowflake reporting access"
 agent-smoke *QUESTION:
-    PYTHONPATH=src uv run python dev/smoke_agent.py {{QUESTION}}
+    PYTHONPATH=src uv run python dev/smoke_agent.py {{ quote(QUESTION) }}
 
 # Housekeeping
 # ------------
