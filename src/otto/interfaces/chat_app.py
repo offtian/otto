@@ -8,6 +8,7 @@ module is only imported by `streamlit run` (just chat), never by the app.
 
 import asyncio
 import pathlib
+import re
 
 import agents
 import logfire
@@ -134,6 +135,31 @@ def _absorb(result: agents.RunResult) -> None:
             {"role": "assistant", "content": str(result.final_output), "steps": steps}
         )
     logfire.force_flush()  # make the trace visible in Tempo/Langfuse right away
+
+
+_DRAFT_FIELDS = ("system", "entitlement", "justification")
+
+
+def _draft_request() -> dict[str, str] | None:
+    """
+    Return prefill values when the conversation's latest message is the
+    assistant drafting an access request (it names all three fields for the
+    user to confirm), else None — the review form only renders beside a draft.
+    """
+    # ponytail: text heuristic over the last assistant message — a dedicated
+    # draft tool call is the structured upgrade if the wording ever drifts.
+    if not st.session_state.history:
+        return None
+    last = st.session_state.history[-1]
+    if last["role"] != "assistant":
+        return None
+    if not all(field in last["content"].lower() for field in _DRAFT_FIELDS):
+        return None
+    draft = {}
+    for field in _DRAFT_FIELDS:
+        match = re.search(rf"{field}\W{{0,4}}:\s*(.+)", last["content"], flags=re.IGNORECASE)
+        draft[field] = match.group(1).strip().strip("*_`").strip() if match else ""
+    return draft
 
 
 if "history" in st.session_state and any(
@@ -271,21 +297,21 @@ if st.session_state.pending:
                 _absorb(asyncio.run(_resume(pending["state_json"], approved=False)))
             st.rerun()
 
-# Structured happy path for the SailPoint request, rendered as an assistant
-# message at the bottom of the chat rather than sidebar chrome. Composes the
-# message with all three fields present so the run goes straight to the gated
-# submit_access_request call and its approval pause. Hidden while an approval
-# is pending — the approval card is the conversation's tail then.
-if not st.session_state.pending:
+# The review form renders only when the assistant just drafted an access
+# request: the drafted values prefill the fields, the user tweaks and
+# submits, and the composed message goes straight to the gated
+# submit_access_request call and its approval pause.
+_draft = None if st.session_state.pending else _draft_request()
+if _draft:
     with (
         st.chat_message("assistant"),
-        st.expander(":material/lock_open: Request access to a system"),
+        st.expander(":material/lock_open: Review the drafted access request", expanded=True),
         st.form("access_request", border=False),
     ):
-        system = st.text_input("System", value="Snowflake reporting warehouse")
-        entitlement = st.text_input("Entitlement", value="read access")
-        justification = st.text_input("Justification", value="quarterly dashboards")
-        if st.form_submit_button("Request access", width="stretch"):
+        system = st.text_input("System", value=_draft["system"])
+        entitlement = st.text_input("Entitlement", value=_draft["entitlement"])
+        justification = st.text_input("Justification", value=_draft["justification"])
+        if st.form_submit_button("Submit for approval", width="stretch"):
             st.session_state.queued_question = (
                 f"Please submit an access request for me: I need the "
                 f"{entitlement!r} entitlement on {system!r}. "
