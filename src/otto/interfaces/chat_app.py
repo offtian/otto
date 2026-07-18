@@ -141,6 +141,24 @@ if "history" in st.session_state and any(
 ):
     st.session_state.clear()  # session predates a hot-reloaded schema change
 
+# One conversation = these four keys; "New chat" and the previous-chats
+# switcher snapshot/restore them as a unit, so a restored chat keeps its
+# pending approval AND its trace context — resumed turns land in the trace
+# the chat started in.
+_CHAT_KEYS = ("input_items", "history", "pending", "chat_trace_context")
+
+
+def _stash_current_chat() -> None:
+    """
+    Archive the live conversation (if it has any messages) and drop its
+    keys, so the init guards below mint a fresh chat on the next rerun.
+    """
+    if st.session_state.history:
+        st.session_state.past_chats.append({key: st.session_state[key] for key in _CHAT_KEYS})
+    for key in _CHAT_KEYS:
+        del st.session_state[key]
+
+
 if "input_items" not in st.session_state:
     st.session_state.input_items = []
     st.session_state.history = []
@@ -148,12 +166,16 @@ if "input_items" not in st.session_state:
 if "chat_trace_context" not in st.session_state:  # own guard: survives hot-reloads
     # One trace per conversation: a root span opened (and ended) at chat
     # start; its context parents every chat_turn/chat_approval span, so the
-    # whole history lands in a single trace. "New chat" clears session state,
+    # whole history lands in a single trace. "New chat" drops the key,
     # which mints the next root — no session-id attribute involved (Logfire's
     # scrubber redacts anything matching "session" before export).
     _root = _tracer.start_span("chat")
     _root.end()
     st.session_state.chat_trace_context = otel_trace.set_span_in_context(_root)
+if "past_chats" not in st.session_state:  # own guard: outlives per-chat resets
+    # ponytail: in-memory only — past chats vanish on page refresh; persist
+    # to disk if the dev loop ever needs them to survive one.
+    st.session_state.past_chats = []
 
 st.title("Otto — dev chat")
 st.caption(
@@ -186,7 +208,7 @@ _EXAMPLES = {
 }
 with st.sidebar:
     if st.button(":material/add_comment: New chat", width="stretch"):
-        st.session_state.clear()  # next run re-inits, incl. a fresh trace root
+        _stash_current_chat()  # next run re-inits, incl. a fresh trace root
         st.rerun()
     st.subheader("Example questions")
     for _group, _questions in _EXAMPLES.items():
@@ -194,6 +216,20 @@ with st.sidebar:
         for _example in _questions:
             if st.button(_example, width="stretch", disabled=bool(st.session_state.pending)):
                 st.session_state.queued_question = _example
+    # Lower section: jump back into any archived conversation. Selecting one
+    # stashes the live chat and restores the pick — messages, any pending
+    # approval, and its trace context all come back together.
+    if st.session_state.past_chats:
+        st.divider()
+        st.subheader(":material/history: Previous chats")
+        for _index, _chat in enumerate(st.session_state.past_chats):
+            _title = _chat["history"][0]["content"][:60]
+            if st.button(_title, key=f"past_chat_{_index}", width="stretch"):
+                _picked = st.session_state.past_chats.pop(_index)
+                _stash_current_chat()
+                for _key, _value in _picked.items():
+                    st.session_state[_key] = _value
+                st.rerun()
 
 for message in st.session_state.history:
     with st.chat_message(message["role"]):
