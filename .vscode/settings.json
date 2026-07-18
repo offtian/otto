@@ -1,0 +1,28 @@
+{
+  // Use the uv-created project venv so imports (pydantic_settings, otto.*) resolve.
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+
+  // src-layout: let Pylance resolve the first-party `otto` package.
+  "python.analysis.extraPaths": ["src"],
+  "python.analysis.autoSearchPaths": true,
+  "python.analysis.typeCheckingMode": "basic",
+
+  // This project lints with Ruff + mypy, not Pylint. Turn Pylint off and use
+  // the Ruff extension (charliermarsh.ruff) instead.
+  "pylint.enabled": false,
+  "ruff.enable": true,
+
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports.ruff": "explicit"
+    }
+  },
+  "ruff.format.preview": true,
+  "python.analysis.autoFormatStrings": true,
+  "editor.formatOnPaste": true,
+  "ruff.format.backend": "uv",
+  "ruff.lineLength": 99
+}
