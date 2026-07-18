@@ -79,10 +79,13 @@ def setup_telemetry(
     )
     logfire.instrument_system_metrics()
     logfire.instrument_openai_agents()
-    # Drop the SDK's default trace processor — it uploads traces to the OpenAI
-    # dashboard and warns when OPENAI_API_KEY is unset (we talk to Ollama/the
-    # gateway, not OpenAI). Logfire captures spans at the trace-provider level,
-    # so it is unaffected.
+    # Empty on purpose: this drops the SDK's default processor, which uploads
+    # traces to the OpenAI dashboard and warns when OPENAI_API_KEY is unset
+    # (we talk to Ollama/the gateway, not OpenAI). Do NOT pass the OTel
+    # processors here — the SDK expects its own TracingProcessor interface
+    # (on_trace_start/…), and ours are already registered with the OTel
+    # pipeline via logfire.configure above. Logfire captures agent spans at
+    # the trace-provider level, so it is unaffected by the empty list.
     agents.set_trace_processors([])
 
 
