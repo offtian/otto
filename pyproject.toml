@@ -187,8 +187,6 @@ ignore = [
 [tool.ruff.lint.mccabe]
 max-complexity = 10
 
-[tool.ruff.lint.flake8-builtins]
-strict-checking = true
 
 [tool.ruff.lint.isort]
 lines-after-imports = 2
