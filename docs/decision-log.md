@@ -7,6 +7,19 @@ this log preserves *how we got there*.
 
 ---
 
+## 2026-07-19 — Blind-spot audit round 2: dev-chat surface, observability, classifier (D21–D24)
+
+Records the 07-18/19 work that landed undocumented, plus the decisions from the
+audit follow-up interview. The fix backlog lives in
+[`hardening-plan.md`](hardening-plan.md).
+
+| ID | Decision | Status | Notes |
+|---|---|---|---|
+| D21 | **The Streamlit chat surface is a dev harness + demo vehicle, not a product channel.** The "no web UI" non-goal now scopes to *product* surfaces. Consequences: D2 conversation reconstruction stays the production context model; the `agent_sessions`/`agent_messages` tables are dev-chat-only; the `channel` column's anticipated `"slack"` tagging does **not** proceed. | Confirmed (interview) | Decided after the audit flagged that 15 of 18 recent commits were chat UX — Phase 3's sessions-vs-reconstruction question was being answered by accretion. Consistent with D19's deferral of SDK session memory to its trigger. As the *demo* vehicle, the chat's guard-free approve button now contradicts the story it demos — fix is hardening-plan D1 (route through `resolve_approval` or label as simulated). |
+| D22 | **Observability = Logfire + OTLP + Langfuse (three sinks); Grafana LGTM replaced Jaeger in the dev stack.** Traces use one-root-span-per-conversation (Logfire's scrubber redacts any attribute matching "session", so Langfuse session ids are unusable). Extends D4, which approved the Logfire+OTLP dual sink only. | Applied | Langfuse is cloud-capable and `otto.thinking_steps` puts tool outputs into span attributes — the content-egress surface grew past what D4 reviewed. Added to the graduation security sign-off (PRD §10); scrub/gate is hardening-plan C3. |
+| D23 | **MCP tools are wrapped as per-tool-gated `FunctionTool`s** (`vendors/mcp.py::MCPServerMount.function_tools`), with `needs_approval` stamped from the default-deny sensitivity policy — replacing the mounted-server `require_approval="always"` model the PRD described. The SDK's dict form was rejected because it defaults *unlisted* tools to ungated, the silent un-gate the 2.6 policy exists to forbid. | Applied | Confluence mounts an explicit read-only allowlist (A1); SailPoint un-gates only the policy's signed-off reads. A tool-name mismatch fails *safe* (gated). PRD §4/§6 updated in v0.4. |
+| D24 | **The firm's ticket-classification API (tickets → assigned team) is the value-hypothesis signal and a graduation integration.** Now: obtain its taxonomy + class-volume distribution to bound the addressable ceiling behind the ≥30% target (hardening-plan E1–E3; capability spend gated on it). Graduation: use it as admission control on `/jira/webhook` (only classes Otto handles trigger runs) and as the routing key that replaces the single triage channel (`TicketBackend` seam). **Approver volume stays unknown by choice** — instrument (per-approver volume + decision latency from the approval store) and let the pilot answer it; no rubber-stamp countermeasures yet. | Confirmed (interview) | The classifier's existence proves a labeled ticket corpus exists at the firm — the audit's top finding was that all in-repo support content (runbooks, golden cases, the 30% target) is invented. Even exporting label counts may need a perimeter nod (D7). |
+
 ## 2026-07-13 — Slack agent mode + rate limiting (D20, 3.5 pulled forward)
 
 Pulled 3.5's single-replica-safe pieces forward on request (the re-plan had

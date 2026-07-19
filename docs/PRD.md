@@ -1,12 +1,17 @@
 # Otto — Firmwide Tech-Support Agent
 
-**PRD & Phased Delivery Plan** · Draft v0.3 · 2026-07-12 · Owner: Ollie Tian
+**PRD & Phased Delivery Plan** · Draft v0.4 · 2026-07-19 · Owner: Ollie Tian
 
-> **v0.3** adds the inbound ticket channel (D8–D10): employees who file Jira
-> tickets get Otto as first responder too — comments as replies, transitions
-> HITL-gated. **v0.2** folded in the blind-spot audit and scoping interview.
-> See [`docs/decision-log.md`](decision-log.md) for what changed and why;
-> step-level execution detail lives in
+> **v0.4** catches the paper up to the code after the round-2 blind-spot audit
+> (D21–D24): closes the stale opens (D5, D6-gap, self-approval), reframes
+> approval per D19 (it authorizes *automation*, not the entitlement), replaces
+> the `require_approval="always"` model with the per-tool default-deny policy
+> (D23), scopes the web-UI/session-memory non-goals to product surfaces (D21),
+> and adds the classifier-API graduation items (D24). Fix backlog:
+> [`docs/hardening-plan.md`](hardening-plan.md). **v0.3** added the inbound
+> ticket channel (D8–D10). **v0.2** folded in the blind-spot audit and scoping
+> interview. See [`docs/decision-log.md`](decision-log.md) for what changed and
+> why; step-level execution detail lives in
 > [`docs/implementation-plan.md`](implementation-plan.md).
 
 ---
@@ -66,8 +71,8 @@ Slack and in the ticket queue.*
 - Not an HR/facilities/general chatbot — tech support only.
 - No autonomous writes to any system of record without HITL (ticket **comments** are the sanctioned reply channel per D10; **transitions** are policy-gated).
 - No fine-tuning / custom models; prompt + tools + evals only.
-- No web UI (the API leaves room for one later).
-- No **persistent** session memory — multi-turn context comes from conversation reconstruction (D2), not a session store, until Phase 3.
+- No **product** web UI (D21) — the Streamlit dev chat is a harness and demo vehicle only, never a support channel.
+- No **persistent** session memory on the product channels — multi-turn context comes from conversation reconstruction (D2). The dev chat's Postgres session store is dev-only (D21); replacing D2 stays trigger-gated (D19).
 - No ServiceNow until graduation (D9); no multi-workspace / Enterprise Grid rollout until Phase 3 (note: the current triage-thread link format hard-codes `slack.com/archives` and is Grid-incompatible — graduation note).
 
 ## 4. Decisions
@@ -76,14 +81,14 @@ Slack and in the ticket queue.*
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Framework | OpenAI Agents SDK (Python; 0.18.2 installed and verified — hard-pin `==` is a Phase 0 task per NFR6; pyproject currently declares `>=0.18.2`) | Native tools/handoffs/HITL — `require_approval`, `RunState` JSON pause-resume and `interruptions` verified against the installed SDK source |
+| Framework | OpenAI Agents SDK (Python; pinned `==0.18.2` per NFR6) | Native tools/handoffs/HITL — `needs_approval`, `RunState` JSON pause-resume and `interruptions` verified against the installed SDK source |
 | Slack transport (D1) | Events API → FastAPI; inbound HTTPS confirmed acceptable (cloudflared tunnel in dev) | API-first; same service can serve other clients |
-| HITL model | Approve **sensitive tools only** | Safe reads flow freely once verified read-only (risk #1); SailPoint/writes pause for Block Kit approve/deny |
+| HITL model | Approve **sensitive tools only**, enforced per tool by the default-deny sensitivity policy (D23): every mounted MCP tool is wrapped as a `FunctionTool` with `needs_approval` stamped from the policy — an unlisted name gates, never silently un-gates. The approval authorizes the *automation* (Otto filing on the requester's behalf), not the entitlement grant (D19) | Safe reads flow freely once verified read-only (risk #1); SailPoint/writes pause for Block Kit approve/deny; SailPoint runs its own approval chain over the actual access |
 | Multi-turn context (D2) | **Conversation reconstruction** per event: Slack `conversations.replies` or Jira comment history; length capped; content treated as **untrusted** | Keeps FR3 in MVP without a session store; resolves the v0.1 contradiction |
 | Approver authorization (D3) | **In MVP**: only users with `support_user` or `admin` role may approve/deny; MVP storage = Slack user ID lists in settings (fields to add); Postgres roles table later | Pulled forward from v0.1's Phase 2 |
 | Model access | Internal LLM gateway | OpenAI-compatible `base_url`; Chat Completions transport (`vendors/llm.py`); SDK's own trace upload disabled — Logfire/OTel is the tracing path |
 | Escalation (MVP) | Slack triage channel | `TicketBackend` protocol (`domain/support/escalation.py`) + `SlackTriageBackend` (`vendors/slack.py`); other backends plug in later, zero agent changes |
-| Observability (D4) | Logfire SDK + OTLP dual sink, approved for the prototype | Logfire UI for agent traces **and** vendor-neutral OTLP; either, both, or neither sink per env (`utils/telemetry.py`) |
+| Observability (D4/D22) | Logfire SDK + OTLP + Langfuse (any combination per env); Grafana LGTM dev backend | Logfire UI for agent traces, vendor-neutral OTLP, Langfuse for LLM-level review; one root span per conversation (Logfire scrubs "session" attributes). The grown content-egress surface is a graduation sign-off item (D22) |
 | “Resolved” definition (D6) | Successful SailPoint submission, a support agent explicitly marks resolved, **or the originating ticket reaches resolved/closed** | Deflection previously measured *answering*, not *resolving*; ticket status is a native signal |
 | Project status (D7) | Personal prototype; firm items are graduation notes | Reframes estimates as sequence |
 | Ticket intake (D8) | **Inbound tickets are a first-class MVP entry point** alongside Slack; domain shapes are channel-neutral | Employees already file tickets; the API-first service just gains a second client |
@@ -93,23 +98,32 @@ Slack and in the ticket queue.*
 
 ### Open (owner: Ollie; decide before the phase that needs them)
 
+All v0.3 opens are closed: **D5** → two-tier eval gating (deterministic
+record/replay tests always-on in pytest; LLM-judged golden evals on demand via
+`just eval` / `workflow_dispatch`). **D6-gap** → a "Did this help?" Yes/No
+vote on Slack answers (T2). **Self-approval** → prohibited, implemented (T3).
+
+Current opens live in [`hardening-plan.md`](hardening-plan.md):
+
 | ID | Question | Recommended default |
 |---|---|---|
-| D5 | Where the gated evals run (CI is GitHub-hosted with no LLM access) | GitHub Actions eval job with an API-key secret, path-filtered triggers + `workflow_dispatch`, required check; deterministic record/replay tests in the normal pytest job |
-| D6-gap | Third resolution signal for **Slack** knowledge Q&A (tickets now have a native signal per D6/D8; Slack answers still count as nothing) | Requester ✅ reaction or a “did this help?” button |
-| — | Self-approval — may a requester approve their own request even with the right role? | **Prohibit** (recommended; decision open — two lines now, awkward retrofit after audit-trail semantics exist) |
+| E1 (D24) | Can the classifier's taxonomy + class volumes be exported into the prototype perimeter? | Ask the API owner for labels + counts only, no ticket text |
+| B2 | Approved-but-unexecuted recovery: auto-resume on restart, or mark failed + notify? | Notify-only — never re-fire a sensitive tool without a human watching |
+| B3 | Approval-card granularity for multi-interruption runs | Render all interruptions on one card now; per-interruption cards at the first real multi-tool run |
+| C1 | Runtime kill-switch mechanism | DB flag with short-TTL cache; settings value as no-DB fallback |
+| D1 | Demo approval path in the dev chat | Route through the real `resolve_approval` with a selectable approver identity |
 
 ## 5. Product Requirements (MVP)
 
 ### Functional
 
 - **FR1 — Entry points:** Otto responds to `@otto` mentions in channels, to DMs, **and to tickets filed in Jira** (webhook-driven). Replies stay in-thread (Slack) or land as ticket comments (Jira). Per event, context is rebuilt from the conversation — `conversations.replies` or the ticket's comment history — capped in length and treated as untrusted input (D2).
-- **FR2 — Knowledge Q&A:** Otto searches Confluence (MCP) before answering; answers cite the source page; if nothing is found it says so and offers escalation. *(Stub tool when MCP unset.)* **Read-only must be enforced, not assumed** (audit A1): the Confluence server is currently mounted with no tool filter and the dev image ships write tools — an early MVP task adds a tool allowlist/read-only mode plus a test asserting the mounted toolset contains no write tools.
+- **FR2 — Knowledge Q&A:** Otto searches Confluence (MCP) before answering; answers cite the source page; if nothing is found it says so and offers escalation. *(Stub tool when MCP unset.)* **Read-only is enforced, not assumed** (audit A1, closed): the Confluence mount carries an explicit read-tool allowlist (`vendors/mcp.py::CONFLUENCE_READ_TOOLS`) and a test asserts the mounted toolset contains no write tools; re-verify against the real tool list at Phase 1.
 - **FR3 — Runbooks:** Otto lists/reads markdown runbooks (`settings.runbooks_dir`) and walks the user through steps interactively, carried across turns by FR1's conversation reconstruction.
-- **FR4 — Access requests:** Otto collects system, entitlement, and business justification, then submits via SailPoint (MCP, `require_approval="always"` — already applied in `vendors/mcp.py`). The run **pauses**; an approve/deny card is posted to the triage channel; the run resumes only after a decision. *(Stub tool when MCP unset — same approval flow.)* Works from either entry point — the outcome is reported back to the originating thread or ticket.
+- **FR4 — Access requests:** Otto collects system, entitlement, and business justification, then submits via SailPoint (MCP; writes gated by the default-deny sensitivity policy, D23). The run **pauses**; an approve/deny card is posted to the triage channel; the run resumes only after a decision. The approval authorizes the *automation* — Otto filing on the requester's behalf — not the entitlement grant, which stays with SailPoint's own approval chain (D19). *(Stub tool when MCP unset — same approval flow.)* Works from either entry point — the outcome is reported back to the originating thread or ticket.
 - **FR5 — Escalation:** When Otto can't resolve (or the user asks for a human), it posts a structured escalation (subject, summary, urgency, requester, link to the thread or ticket) to the triage channel and tells the user in their channel.
 - **FR6 — HITL resume:** Approve → the paused tool executes and Otto reports the outcome at the request's origin. Deny → Otto explains the denial gracefully. The card is updated with resolver + outcome. Concurrent clicks resolve exactly once (`ApprovalAlreadyResolved` guard, already in the domain store).
-- **FR7 — Approver authorization (D3):** Only `support_user`/`admin` role holders may approve/deny; unauthorized clicks get a polite rejection, no state change, and an audit log event. Approval cards live in the Slack triage channel regardless of where the request originated. Self-approval: prohibited — recommended default, decision open (§4).
+- **FR7 — Approver authorization (D3):** Only `support_user`/`admin` role holders may approve/deny; unauthorized clicks get a polite rejection, no state change, and an audit log event. Approval cards live in the Slack triage channel regardless of where the request originated. Self-approval: prohibited, implemented (T3) — cross-channel via the identity directory (D15); fail-closed hardening on unmapped identities is hardening-plan B1.
 - **FR8 — Failure path (audit A8):** If the background handler dies after the intake ack, the user still gets an apologetic error reply at the origin (thread or ticket comment), and the failure is logged/alerted. No silent drops; a kill switch disables Otto's replies without undeploying.
 - **FR9 — Ticket channel semantics (D8/D9/D10):** Jira intake via a secret-verified webhook endpoint; Otto's **own** webhook events are filtered by actor (no reply loops) and deduped. Otto's replies are ticket comments (safe per D10). Ticket status transitions are exposed only through the per-tool sensitivity policy — **default-gated** until explicitly classified. Ticket resolved/closed status feeds the D6 resolution metric.
 
@@ -117,17 +131,17 @@ Slack and in the ticket queue.*
 
 - **NFR1:** Intake ack fast on every channel — Slack events ack < 3s (background task execution; Slack retry dedup); Jira webhooks ack immediately with the same background dispatch.
 - **NFR2:** All agent runs, tool calls, and LLM generations traced (Logfire + OTLP); no chat text in logs at INFO. Note: `logfire.instrument_openai_agents()` records prompt/completion content in spans by default — acceptable for the prototype (D4); scrubbing is mandatory before any real-data pilot.
-- **NFR3:** Golden-set eval pass rate ≥ 90% before any prompt/tool change merges. The threshold is meaningful only at ≥ 20 cases — at the initial n=3 it is a smoke test, not a gate. Enforcement point is open (D5).
+- **NFR3:** Golden-set eval pass rate ≥ 90% before any prompt/tool change merges. The threshold is meaningful only at ≥ 20 cases — at the initial n=3 it is a smoke test, not a gate. Enforcement per D5 (closed): deterministic record/replay tests always-on in pytest; LLM-judged golden evals on demand.
 - **NFR4:** Secrets only via env; Slack request-signature verification and Jira webhook secret verification on every endpoint.
 - **NFR5:** Layered architecture (import-linter enforced); new integrations = vendors adapter + config wiring only.
 - **NFR6 (audit A9):** `openai-agents` stays pinned; a test round-trips a serialized `run_state_json` so an incompatible SDK upgrade fails `just test`; pending approvals are drained before SDK upgrades.
 
 ### Out of MVP (explicitly)
 
-Durable approval store (in-memory MVP; Postgres slot ready via the
-`ApprovalStore` protocol), Postgres-backed roles, persistent session memory,
-streaming replies, ServiceNow (graduation, D9), specialist sub-agents, online
-evals.
+Persistent session memory on product channels (D21/D19), streaming replies,
+ServiceNow (graduation, D9), specialist sub-agents, online evals. (The durable
+Postgres approval store and Postgres roles, listed here in v0.3, were built
+ahead of plan — see Phase 2.)
 
 ## 6. Architecture
 
@@ -144,7 +158,7 @@ evals.
       ▼
  Otto (Agents SDK): instructions + tools                     [application/agents]
       ├─ search_knowledge ──► Confluence MCP (read-only enforced + tested)
-      ├─ request_access ────► SailPoint MCP (require_approval=always)
+      ├─ request_access ────► SailPoint MCP (default-deny policy → needs_approval per tool)
       ├─ list/read_runbook ─► runbooks/*.md (safe)
       └─ escalate_to_human ─► TicketBackend ► Slack triage channel
       │
@@ -173,7 +187,7 @@ evals → config → domain → vendors → data → utils → settings`.
 Phases are a sequence, not a calendar (D7). Step-level detail, gates, and
 acceptance criteria per step: [`docs/implementation-plan.md`](implementation-plan.md).
 
-### Phase 0 — Walking skeleton *(in progress)*
+### Phase 0 — Walking skeleton *(code-complete; live channel verification pending dev accounts T7/T9)*
 
 Everything runs end-to-end **with zero external dependencies** (stub tools, in-memory store).
 
@@ -183,16 +197,16 @@ Everything runs end-to-end **with zero external dependencies** (stub tools, in-m
 - [x] Vendor adapters: `vendors/llm.py` (gateway model, SDK tracing off), `vendors/mcp.py` (Confluence; SailPoint with `require_approval="always"`), `vendors/slack.py` (gateway, approval card, triage backend)
 - [x] Domain support layer: `SupportRequest`/`Capability`, `PendingApproval` + `ApprovalStore` protocol + `InMemoryApprovalStore`, `TicketBackend` protocol
 - [x] Telemetry bootstrap: `utils/telemetry.py` (Logfire + optional OTLP, `instrument_openai_agents()`)
-- [ ] Pin `openai-agents==0.18.2` (NFR6; currently `>=0.18.2`)
-- [ ] **Channel-neutral domain shapes (D8):** `SupportRequest`/`PendingApproval` gain an origin reference (Slack thread | Jira issue) replacing Slack-only fields
-- [ ] Composition root wiring (`config.py` currently wires settings only), incl. `JiraGateway` when configured
-- [ ] FastAPI app: `/slack/events` (signature check, challenge, dedup, <3s ack), `/slack/interactions`, **`/jira/webhook` (secret check, own-actor filter, dedup)**, `/healthz`
-- [ ] Otto agent: instructions + 4 capability tools (knowledge/access stubs, runbooks, escalate) with conversation reconstruction for both channels (D2)
-- [ ] HITL loop: pause → approval card → role-checked resume → outcome at origin (FR6/FR7; in-memory store)
-- [ ] Confluence read-only enforcement + no-write-tools test (A1)
-- [ ] Failure-path error reply + alerting, both channels (FR8)
-- [ ] Eval harness: 3 golden cases + LLM judge; **add the `eval` recipe to the justfile** (referenced in v0.1 but not yet present)
-- [ ] Sample runbooks (`runbooks/` does not exist yet), `.env.example` covering every `Settings` field
+- [x] Pin `openai-agents==0.18.2` (NFR6)
+- [x] **Channel-neutral domain shapes (D8):** `SupportRequest`/`PendingApproval` carry an `Origin` (Slack thread | Jira issue)
+- [x] Composition root wiring (`config.py`), incl. `JiraGateway` when configured
+- [x] FastAPI app: `/slack/events` (signature check, challenge, dedup, <3s ack), `/slack/interactions`, **`/jira/webhook` (secret check, own-actor filter, dedup)**, `/healthz`
+- [x] Otto agent: instructions + capability tools (knowledge/access stubs, runbooks, escalate) with conversation reconstruction for both channels (D2)
+- [x] HITL loop: pause → approval card → role-checked resume → outcome at origin (FR6/FR7)
+- [x] Confluence read-only enforcement + no-write-tools test (A1)
+- [x] Failure-path error reply + alerting, both channels (FR8)
+- [x] Eval harness: 3 golden cases + `just eval` recipe (D12: plain pytest; the YAML runner + LLM judge wait for n≈20)
+- [x] Sample runbooks (`runbooks/`, 10 files), `.env.example` covering every `Settings` field
 - **Exit:** `just lint && just test` green; Slack DM → stubbed answer → approval card → role-checked resume; **Jira ticket → comment answer → same approval flow → outcome as ticket comment** — both against dev instances.
 
 ### Phase 1 — Knowledge MVP pilot
@@ -207,9 +221,14 @@ Real value, lowest risk: read-only knowledge + human escalation, on both channel
 - Graduation items if piloting inside the firm: deploy behind ingress, firm OTLP collector, Slack app install in pilot channels
 - **Exit criteria:** ≥ 30% of pilot questions **resolved** (per D6) without human touch across both channels; eval pass ≥ 90% at n ≥ 20; support-team sign-off on escalation quality.
 
-### Phase 2 — Access automation + durable HITL
+### Phase 2 — Access automation + durable HITL *(largely built ahead of Phase 1, per the D19 re-plan)*
 
-The approval flow earns its keep.
+The approval flow earns its keep. Already built: Postgres approval store
+(`ApprovalRecord` + migrations, atomic conditional resolve), Postgres
+roles/identity directory, expiry + reminders + `run_state_json` retention
+sweep, per-tool sensitivity policy (D23), audit report. Remaining: live
+SailPoint MCP verification against the real tool list and the exit-criteria
+run.
 
 - SailPoint MCP live; verify **every** exposed tool actually pauses (test against the real tool list, not assumptions)
 - Postgres approval store: `ApprovalRecord` table **to be added** to `data/models.py` (which today holds only the `ExampleRecord` placeholder — v0.1 overstated this) + migration; approvals survive restarts; full audit trail; atomic conditional resolve
@@ -238,23 +257,25 @@ Targets are directional while Otto is a prototype (D7); they become gates at gra
 | Unapproved sensitive writes | **0, always** | audit log |
 
 “Resolved” = successful SailPoint submission, explicit resolution by a support
-agent, **or the originating ticket reaching resolved/closed** (D6/D8). Slack
-knowledge-Q&A still registers under no signal — closing that gap (✅ reaction /
-“did this help?”) is a Phase 1 prerequisite for the Slack side of the metric.
+agent, **or the originating ticket reaching resolved/closed** (D6/D8). The
+Slack knowledge-Q&A gap is closed: a “Did this help?” Yes/No vote rides Slack
+answers (T2) — yes records a resolution, no escalates to the triage channel.
+The ≥ 30% target itself gets recalibrated against the classifier-derived
+addressable ceiling once hardening-plan E1/E2 land (D24).
 
 ## 9. Risks & Open Questions
 
 | # | Risk / question | Status / mitigation |
 |---|---|---|
-| 1 | **Confluence path is not actually read-only** (A1): no tool filter on the mounted MCP server; the dev image ships write tools | **Open — early MVP task.** Tool allowlist/read-only mode + a test asserting no write tools in the mounted toolset |
-| 2 | PII/chat content in traces — `instrument_openai_agents()` records content by default (A6) | Logfire dual-sink approved for the prototype (D4); scrubbing + OTel attribute filtering mandatory before any real-data pilot |
+| 1 | **Confluence path is not actually read-only** (A1) | **Closed.** Explicit read-tool allowlist on the mount (D23) + a test asserting no write tools; re-verify against the real tool list at Phase 1 |
+| 2 | PII/chat content in traces — `instrument_openai_agents()` records content by default (A6); the egress surface grew with Langfuse and `otto.thinking_steps` span content (D22) | Accepted for the prototype; scrubbing + OTel attribute filtering mandatory before any real-data pilot (hardening-plan C3); Langfuse export added to the graduation security sign-off |
 | 3 | Gateway rate limits / model quality on gateway-routed models | Load-test via the LiteLLM stand-in; eval set doubles as regression net — a model swap is one `.env` value |
 | 4 | Confluence MCP hosting: firm-hosted `mcp-atlassian` (as in `compose.yml`) vs Atlassian remote | Decide at Phase 1 start; stub keeps dev unblocked |
 | 5 | In-memory approvals lost on restart | Accepted for the prototype (card persists in Slack; requester re-asks); Phase 2 makes durable |
 | 6 | Slack retry storms / duplicate events | event-id/ts dedup in Phase 0; Redis dedup before multi-replica |
 | 7 | Prompt injection — **two** surfaces: Confluence page content **and** reconstructed conversation content (Slack threads *and* Jira comments, D2/D8) | Instructions hardening + adversarial eval cases; history cap; writes stay HITL-gated regardless, so injection cannot cause an unapproved action |
 | 8 | `run_state_json` holds the full conversation (A9): PII at rest once persisted; format coupled to a 0.x SDK — an upgrade can strand pending approvals | Pin SDK; round-trip test (NFR6); drain pending approvals before upgrades; retention/expiry in Phase 2 |
-| 9 | Eval gate has no enforcement point — GitHub-hosted CI has no LLM access (A7) | **Open — D5**; recommended default documented in §4 |
+| 9 | Eval gate has no enforcement point — GitHub-hosted CI has no LLM access (A7) | **Closed — D5**: deterministic record/replay tests always-on in pytest; LLM-judged golden evals on demand (`just eval` / `workflow_dispatch`) |
 | 10 | Background task dies silently after the intake ack (A8) | Mitigated by FR8: catch-all error reply at the origin + alerting + kill switch |
 | 11 | **Bot reply loops on the ticket channel**: Otto's own comments re-trigger the Jira webhook | FR9: own-actor filtering + event dedup at `/jira/webhook`; loop test in the interface suite |
 
@@ -262,11 +283,11 @@ knowledge-Q&A still registers under no signal — closing that gap (✅ reaction
 
 **Prototype (in-repo, no firm dependencies):**
 
-- [x] PRD v0.3 reviewed (this doc; decisions in `docs/decision-log.md`)
+- [x] PRD v0.4 reviewed (this doc; decisions in `docs/decision-log.md`)
 - [ ] Jira Cloud dev instance created (free tier) + API token + webhook secret
-- [ ] Phase 0 skeleton complete per §7 checklist — both entry points
-- [ ] Confluence read-only enforcement test green (risk #1)
-- [ ] `just eval` recipe + 3 golden cases running against the LiteLLM stand-in
+- [x] Phase 0 skeleton complete per §7 checklist — both entry points
+- [x] Confluence read-only enforcement test green (risk #1)
+- [x] `just eval` recipe + 3 golden cases (D12: plain pytest; judge deferred to n≈20)
 
 **Graduation notes (needed only when Otto becomes a firm deliverable):**
 
@@ -274,6 +295,8 @@ knowledge-Q&A still registers under no signal — closing that gap (✅ reaction
 - [ ] Firm Jira (or ServiceNow, D9) endpoints + integration account; webhook allowlisting
 - [ ] Gateway credentials issued for an Otto service account
 - [ ] Confluence/SailPoint MCP endpoints identified; data-egress review
-- [ ] Security sign-off: Logfire SaaS export, PII scrubbing rules, approver policy, ticket write posture (D10)
+- [ ] Security sign-off: Logfire SaaS + Langfuse export (D22), PII scrubbing rules, approver policy, ticket write posture (D10)
 - [ ] Deployment behind firm ingress; firm OTLP collector endpoint
 - [ ] Enterprise Grid-safe thread links (replace hard-coded `slack.com/archives`)
+- [ ] Classifier API integration (D24): admission control on `/jira/webhook` (only classes Otto handles trigger runs) + escalation routing key replacing the single triage channel (`TicketBackend` seam)
+- [ ] SailPoint reality check: the T8 tool surface is a mock invention — budget an adapter + instruction/eval rewrite if the firm integration differs (MCP is unconfirmed); default-deny fails safe on name mismatch meanwhile

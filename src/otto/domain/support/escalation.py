@@ -5,6 +5,11 @@ Implementations satisfy this protocol *structurally* (vendors sit below
 domain and never import it): today a Slack triage channel
 (``vendors.slack.SlackTriageBackend``); ServiceNow or Jira adapters plug
 into the same seam later without touching the agent.
+
+Graduation note (D24): the firm's ticket-classification API will supply a
+routing key (assigned team) so escalations fan out per team instead of one
+triage channel — a routing parameter on this seam, decided at graduation,
+not before.
 """
 
 from typing import Protocol
