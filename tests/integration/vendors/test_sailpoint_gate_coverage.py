@@ -11,6 +11,8 @@ Live: needs the mock (`docker compose --profile sailpoint up`, or
 """
 
 import os
+import socket
+import urllib.parse
 
 import pytest
 
@@ -18,18 +20,36 @@ from otto.domain.support import policy
 from otto.vendors import mcp as mcp_vendor
 
 
+SAILPOINT_URL = os.environ.get("SAILPOINT_MCP_URL", "http://localhost:9100/mcp")
+
+
+def _mock_reachable() -> bool:
+    """
+    Test whether the mock SailPoint MCP is listening — the fixture otherwise
+    dies mid-connect with an opaque ConnectError instead of a clean skip.
+    """
+    parsed = urllib.parse.urlparse(SAILPOINT_URL)
+    try:
+        with socket.create_connection((parsed.hostname, parsed.port or 80), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 pytestmark = [
     pytest.mark.skipif(
         not os.environ.get("RUN_INTEGRATION"),
         reason="needs the mock SailPoint MCP — run via `just test-integration`",
+    ),
+    pytest.mark.skipif(
+        bool(os.environ.get("RUN_INTEGRATION")) and not _mock_reachable(),
+        reason="mock SailPoint MCP not reachable — `docker compose --profile sailpoint up -d`",
     ),
     # The MCP streamable-HTTP client emits a DeprecationWarning from inside the
     # SDK transport on connect; it is not ours to fix, so don't let the suite's
     # filterwarnings=error turn SDK noise into a gate-coverage failure.
     pytest.mark.filterwarnings("ignore::DeprecationWarning"),
 ]
-
-SAILPOINT_URL = os.environ.get("SAILPOINT_MCP_URL", "http://localhost:9100/mcp")
 
 # The reads cleared by the T8 surface (2026-07-12). Everything else the server
 # mounts — the two writes and any future tool — must be gated by default-deny.

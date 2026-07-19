@@ -15,6 +15,8 @@ Live: needs Postgres + the mock (`docker compose --profile sailpoint up`, or
 
 import json
 import os
+import socket
+import urllib.parse
 from datetime import UTC, datetime
 
 import databases
@@ -39,10 +41,30 @@ from otto.vendors import mcp as mcp_vendor
 from otto.vendors import slack as slack_vendor
 
 
+SAILPOINT_URL = os.environ.get("SAILPOINT_MCP_URL", "http://localhost:9100/mcp")
+
+
+def _mock_reachable() -> bool:
+    """
+    Test whether the mock SailPoint MCP is listening — the suite otherwise
+    dies mid-connect with an opaque TaskGroup error instead of a clean skip.
+    """
+    parsed = urllib.parse.urlparse(SAILPOINT_URL)
+    try:
+        with socket.create_connection((parsed.hostname, parsed.port or 80), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 pytestmark = [
     pytest.mark.skipif(
         not os.environ.get("RUN_INTEGRATION"),
         reason="needs Postgres + the mock SailPoint MCP — run via `just test-integration`",
+    ),
+    pytest.mark.skipif(
+        bool(os.environ.get("RUN_INTEGRATION")) and not _mock_reachable(),
+        reason="mock SailPoint MCP not reachable — `docker compose --profile sailpoint up -d`",
     ),
     # SDK transport emits a DeprecationWarning on connect — not ours to fix.
     pytest.mark.filterwarnings("ignore::DeprecationWarning"),
@@ -51,7 +73,6 @@ pytestmark = [
 DB_URL = _dsn.to_libpq(
     os.environ.get("DATABASE_URL", "postgresql+asyncpg://postgres@localhost:5432/otto")
 )
-SAILPOINT_URL = os.environ.get("SAILPOINT_MCP_URL", "http://localhost:9100/mcp")
 
 APPROVE, DENY, EXPIRE = 40, 7, 3  # 50 staged requests
 
