@@ -444,6 +444,26 @@ async def _requester_label(
     return user_id
 
 
+def paused_call_fields(*, result: agents.RunResult) -> tuple[str, str]:
+    """
+    Return the (tool_name, tool_arguments) encoding of a paused run's
+    interruptions for a ``PendingApproval`` — every interrupted call named
+    (B3), a single call's raw arguments as-is, several as a JSON list that
+    ``_approval_summary`` renders per tool. The one encoder for every surface
+    that stores approvals (Slack path and dev chat alike).
+    """
+    interruptions = result.interruptions
+    tool_name = " + ".join(dict.fromkeys((i.tool_name or "unknown") for i in interruptions))
+    if len(interruptions) == 1:
+        return tool_name, _tool_arguments(interruptions[0])
+    return tool_name, json.dumps(
+        [
+            {"tool": i.tool_name or "unknown", "arguments": _tool_arguments(i)}
+            for i in interruptions
+        ]
+    )
+
+
 async def _pause_for_approval(
     *,
     request: entities.SupportRequest,
@@ -453,17 +473,7 @@ async def _pause_for_approval(
     # One card still covers the whole run (one decision), but it names every
     # interrupted call (B3) — the approver never authorizes an unseen tool.
     # Per-tool cards remain the upgrade if mixed runs show up for real.
-    interruptions = result.interruptions
-    tool_name = " + ".join(dict.fromkeys((i.tool_name or "unknown") for i in interruptions))
-    if len(interruptions) == 1:
-        tool_arguments = _tool_arguments(interruptions[0])
-    else:
-        tool_arguments = json.dumps(
-            [
-                {"tool": i.tool_name or "unknown", "arguments": _tool_arguments(i)}
-                for i in interruptions
-            ]
-        )
+    tool_name, tool_arguments = paused_call_fields(result=result)
 
     # A re-triggered event on the same conversation (e.g. the requester nudges
     # the ticket during the approval gap) reruns the agent and can reach the

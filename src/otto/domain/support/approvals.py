@@ -69,6 +69,11 @@ class PendingApproval:
     tool_name: str
     tool_arguments: str
     run_state_json: str
+    # Which surface owns this approval ("slack" | "streamlit"): the server's
+    # sweep and recovery act only on their own surface's rows — without the
+    # tag they would expire dev-chat cards into a nonexistent Slack channel
+    # and replay chat-approved tools from the server process.
+    channel: str = "slack"
     status: ApprovalStatus = ApprovalStatus.PENDING
     card_channel: str = ""
     card_ts: str = ""
@@ -132,12 +137,12 @@ class ApprovalStore(Protocol):
         """
         ...
 
-    async def list_unexecuted(self) -> list[PendingApproval]:
+    async def list_unexecuted(self, *, channel: str = "slack") -> list[PendingApproval]:
         """
-        Return approved/denied approvals whose run state is still present but
-        whose execution was never stamped (B2) — decided in a process that
-        died before the resumed run completed. Expired approvals owe no
-        execution and are excluded.
+        Return approved/denied ``channel`` approvals whose run state is still
+        present but whose execution was never stamped (B2) — decided in a
+        process that died before the resumed run completed. Expired approvals
+        owe no execution; other surfaces recover their own rows.
         """
         ...
 
@@ -154,20 +159,25 @@ class ApprovalStore(Protocol):
         """
         ...
 
-    async def expire_pending(self, *, cutoff: datetime) -> list[PendingApproval]:
+    async def expire_pending(
+        self, *, cutoff: datetime, channel: str = "slack"
+    ) -> list[PendingApproval]:
         """
-        Transition every approval still pending since before ``cutoff`` to
-        ``EXPIRED`` and return the ones just expired (so their cards can be
-        closed out). Guarded on ``status = pending``, so it never races a
-        concurrent resolve — whichever lands first wins, the other is rejected.
+        Transition every ``channel`` approval still pending since before
+        ``cutoff`` to ``EXPIRED`` and return the ones just expired (so their
+        cards can be closed out). Guarded on ``status = pending``, so it never
+        races a concurrent resolve — whichever lands first wins. Scoped to one
+        surface: the server must never close another surface's cards.
         """
         ...
 
-    async def claim_due_reminders(self, *, cutoff: datetime) -> list[PendingApproval]:
+    async def claim_due_reminders(
+        self, *, cutoff: datetime, channel: str = "slack"
+    ) -> list[PendingApproval]:
         """
-        Return the pending approvals last nudged (or, if never, created)
-        before ``cutoff``, stamping their reminder time to now so the next
-        sweep waits another interval. Each due approval is claimed once.
+        Return the pending ``channel`` approvals last nudged (or, if never,
+        created) before ``cutoff``, stamping their reminder time to now so the
+        next sweep waits another interval. Each due approval is claimed once.
         """
         ...
 
@@ -252,11 +262,12 @@ class InMemoryApprovalStore:
         approval = await self.get(approval_id)
         self._approvals[approval_id] = attrs.evolve(approval, executed_at=datetime.now(tz=UTC))
 
-    async def list_unexecuted(self) -> list[PendingApproval]:
+    async def list_unexecuted(self, *, channel: str = "slack") -> list[PendingApproval]:
         return [
             approval
             for approval in self._approvals.values()
             if approval.status in (ApprovalStatus.APPROVED, ApprovalStatus.DENIED)
+            and approval.channel == channel
             and approval.executed_at is None
             and approval.run_state_json
         ]
@@ -269,11 +280,13 @@ class InMemoryApprovalStore:
     async def list_events(self) -> list[audit.AuditEvent]:
         return list(self._events)
 
-    async def expire_pending(self, *, cutoff: datetime) -> list[PendingApproval]:
+    async def expire_pending(
+        self, *, cutoff: datetime, channel: str = "slack"
+    ) -> list[PendingApproval]:
         now = datetime.now(tz=UTC)
         expired: list[PendingApproval] = []
         for approval_id, approval in list(self._approvals.items()):
-            if approval.status is not ApprovalStatus.PENDING:
+            if approval.status is not ApprovalStatus.PENDING or approval.channel != channel:
                 continue
             if self._created_at.get(approval_id, now) >= cutoff:
                 continue
@@ -282,11 +295,13 @@ class InMemoryApprovalStore:
             expired.append(evolved)
         return expired
 
-    async def claim_due_reminders(self, *, cutoff: datetime) -> list[PendingApproval]:
+    async def claim_due_reminders(
+        self, *, cutoff: datetime, channel: str = "slack"
+    ) -> list[PendingApproval]:
         now = datetime.now(tz=UTC)
         due: list[PendingApproval] = []
         for approval_id, approval in self._approvals.items():
-            if approval.status is not ApprovalStatus.PENDING:
+            if approval.status is not ApprovalStatus.PENDING or approval.channel != channel:
                 continue
             last = self._reminded_at.get(approval_id) or self._created_at.get(approval_id, now)
             if last >= cutoff:
@@ -394,8 +409,10 @@ class PostgresApprovalStore:
         # origin_to_json emits fixed key order, so equality on the stored TEXT
         # is exact for both origin kinds. Arguments compare canonically in
         # Python (B4) — pending rows per origin+tool are at most a handful.
+        # Only the compare column comes back: run_state_json is the widest
+        # column by far and this is an existence check on the hot save path.
         rows = await self.database.fetch_all(
-            sa.select(table).where(
+            sa.select(table.c.id, table.c.tool_arguments).where(
                 sa.and_(
                     table.c.status == ApprovalStatus.PENDING.value,
                     table.c.origin == entities.origin_to_json(origin),
@@ -405,9 +422,8 @@ class PostgresApprovalStore:
         )
         wanted = canonical_arguments(tool_arguments)
         for row in rows:
-            approval = _from_row(row)
-            if canonical_arguments(approval.tool_arguments) == wanted:
-                return approval
+            if canonical_arguments(row["tool_arguments"]) == wanted:
+                return await self.get(row["id"])
         return None
 
     async def mark_executed(self, approval_id: str) -> None:
@@ -416,7 +432,7 @@ class PostgresApprovalStore:
             sa.update(table).where(table.c.id == approval_id).values(executed_at=sa.func.now())
         )
 
-    async def list_unexecuted(self) -> list[PendingApproval]:
+    async def list_unexecuted(self, *, channel: str = "slack") -> list[PendingApproval]:
         table = _TABLE
         rows = await self.database.fetch_all(
             sa.select(table).where(
@@ -424,6 +440,7 @@ class PostgresApprovalStore:
                     table.c.status.in_(
                         [ApprovalStatus.APPROVED.value, ApprovalStatus.DENIED.value]
                     ),
+                    table.c.channel == channel,
                     table.c.executed_at.is_(None),
                     table.c.run_state_json.is_not(None),
                 )
@@ -455,13 +472,16 @@ class PostgresApprovalStore:
             for row in rows
         ]
 
-    async def expire_pending(self, *, cutoff: datetime) -> list[PendingApproval]:
+    async def expire_pending(
+        self, *, cutoff: datetime, channel: str = "slack"
+    ) -> list[PendingApproval]:
         table = _TABLE
         update = (
             sa.update(table)
             .where(
                 sa.and_(
                     table.c.status == ApprovalStatus.PENDING.value,
+                    table.c.channel == channel,
                     table.c.created_at < cutoff,
                 )
             )
@@ -471,13 +491,16 @@ class PostgresApprovalStore:
         rows = await self.database.fetch_all(update)
         return [_from_row(row) for row in rows]
 
-    async def claim_due_reminders(self, *, cutoff: datetime) -> list[PendingApproval]:
+    async def claim_due_reminders(
+        self, *, cutoff: datetime, channel: str = "slack"
+    ) -> list[PendingApproval]:
         table = _TABLE
         update = (
             sa.update(table)
             .where(
                 sa.and_(
                     table.c.status == ApprovalStatus.PENDING.value,
+                    table.c.channel == channel,
                     sa.func.coalesce(table.c.reminded_at, table.c.created_at) < cutoff,
                 )
             )
@@ -542,6 +565,7 @@ def _to_row(approval: PendingApproval) -> dict[str, object]:
         "tool_name": approval.tool_name,
         "tool_arguments": approval.tool_arguments,
         "run_state_json": approval.run_state_json,
+        "channel": approval.channel,
         "status": approval.status.value,
         "card_channel": approval.card_channel,
         "card_ts": approval.card_ts,
@@ -563,6 +587,7 @@ def _from_row(row: Any) -> PendingApproval:
         tool_name=data["tool_name"],
         tool_arguments=data["tool_arguments"],
         run_state_json=data["run_state_json"] or "",
+        channel=data["channel"],
         status=ApprovalStatus(data["status"]),
         card_channel=data["card_channel"],
         card_ts=data["card_ts"],

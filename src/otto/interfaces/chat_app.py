@@ -161,22 +161,31 @@ class _ChatGateway:
         )
 
 
-def _wire_runtime(database: databases.Database) -> config.Configuration:
+def _fresh_agent() -> agents.Agent[support_agent.SupportContext]:
     """
-    Point the process-wide configuration at this event loop's resources: the
-    chat gateway, the durable stores over the given connection, the yaml user
-    directory, and a freshly-bound model/agent (the AsyncOpenAI client binds
-    to the loop of the current ``asyncio.run``). Mutating the singleton is
-    safe here — the chat surface is this process's only config consumer.
+    Build the agent on the current event loop — the AsyncOpenAI client binds
+    to the loop of the enclosing ``asyncio.run``, so every interaction needs
+    its own. Also re-enables SDK tracing, which ``build_model`` turns off but
+    the logfire→OTLP export depends on.
     """
-    cfg = config.get_config()
     model = llm.build_model(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
         model_name=settings.llm_model,
     )
-    cfg.model = model
-    cfg.agent = support_agent.build_agent(model=model)
+    agents.set_tracing_disabled(disabled=False)
+    return support_agent.build_agent(model=model)
+
+
+def _wire_runtime(database: databases.Database) -> config.Configuration:
+    """
+    Point the process-wide configuration at this event loop's resources: the
+    chat gateway, the durable stores over the given connection, the yaml user
+    directory, and a freshly-bound agent. Mutating the singleton is safe
+    here — the chat surface is this process's only config consumer.
+    """
+    cfg = config.get_config()
+    cfg.agent = _fresh_agent()
     cfg.slack = _ChatGateway(database)  # type: ignore[assignment]
     cfg.triage = _NoopTicketBackend()  # type: ignore[assignment]
     cfg.jira = None
@@ -184,7 +193,6 @@ def _wire_runtime(database: databases.Database) -> config.Configuration:
         users=identity_users.load_users(pathlib.Path(settings.users_file))
     )
     cfg.approvals = support_approvals.PostgresApprovalStore(database=database)
-    agents.set_tracing_disabled(disabled=False)
     return cfg
 
 
@@ -259,12 +267,10 @@ async def _write_pending(
     )
 
 
-def _set_pending(
-    chat_id: str, *, approval_id: str | None, tool: str | None, args: str | None
-) -> None:
+def _clear_pending(chat_id: str) -> None:
     async def update() -> None:
         async with db.database() as database:
-            await _write_pending(database, chat_id, approval_id=approval_id, tool=tool, args=args)
+            await _write_pending(database, chat_id, approval_id=None, tool=None, args=None)
 
     asyncio.run(update())
 
@@ -287,25 +293,15 @@ def _trace_context(meta: dict[str, Any]) -> otel_context.Context:
 
 def _build() -> tuple[agents.Agent[support_agent.SupportContext], support_agent.SupportContext]:
     """
-    Build the agent + context fresh per interaction: the AsyncOpenAI client
-    binds to the current event loop, and each asyncio.run() uses a new one.
+    Build the agent + context fresh per interaction (see ``_fresh_agent``).
     """
-    model = llm.build_model(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model_name=settings.llm_model,
-    )
-    agent = support_agent.build_agent(model=model)
     context = support_agent.SupportContext(
-        requester_id="U_STREAMLIT",
-        origin_ref="streamlit",
+        requester_id=_REQUESTER_ID,
+        origin_ref=_CHANNEL,
         runbooks_dir=pathlib.Path(settings.runbooks_dir),
         ticket_backend=_NoopTicketBackend(),
     )
-    # build_model() disables SDK tracing, which also starves the logfire→OTLP
-    # export; re-enable it so every chat turn emits a trace.
-    agents.set_tracing_disabled(disabled=False)
-    return agent, context
+    return _fresh_agent(), context
 
 
 async def _run_turn(chat_id: str, question: str) -> agents.RunResult:
@@ -321,9 +317,7 @@ async def _pause(chat_id: str, result: agents.RunResult, *, question: str) -> No
     approval store (D1) and note its id on the session row so the card
     survives reruns and restarts.
     """
-    interruptions = result.interruptions
-    tool = " + ".join(dict.fromkeys(getattr(i.raw_item, "name", "tool") for i in interruptions))
-    args = "; ".join(str(getattr(i.raw_item, "arguments", "")) for i in interruptions)
+    tool, args = support_app.paused_call_fields(result=result)
     approval_id = str(uuid.uuid4())
     async with db.database() as database:
         await support_approvals.PostgresApprovalStore(database=database).save(
@@ -336,6 +330,7 @@ async def _pause(chat_id: str, result: agents.RunResult, *, question: str) -> No
                 tool_name=tool,
                 tool_arguments=args,
                 run_state_json=result.to_state().to_string(),
+                channel=_CHANNEL,
                 card_channel=_CHANNEL,
                 card_ts=chat_id,
             )
@@ -355,11 +350,8 @@ async def _resolve(chat_id: str, approval_id: str, *, resolver_id: str, approved
         await support_app.resolve_approval(
             approval_id=approval_id, resolver_id=resolver_id, approved=approved
         )
-        try:
-            pending = await cfg.approvals.get(approval_id)
-        except support_approvals.ApprovalNotFound:
-            pending = None
-        if pending is None or pending.status is not support_approvals.ApprovalStatus.PENDING:
+        pending = await cfg.approvals.get(approval_id)
+        if pending.status is not support_approvals.ApprovalStatus.PENDING:
             await _write_pending(database, chat_id, approval_id=None, tool=None, args=None)
 
 
@@ -443,7 +435,7 @@ def _absorb(result: agents.RunResult, *, chat_id: str, question: str) -> None:
     if result.interruptions:
         asyncio.run(_pause(chat_id, result, question=question))
     else:
-        _set_pending(chat_id, approval_id=None, tool=None, args=None)
+        _clear_pending(chat_id)
     logfire.force_flush()  # make the trace visible in Tempo/Langfuse right away
 
 
@@ -527,25 +519,22 @@ def _thinking_expander(steps: tuple[str, ...], *, expanded: bool = False) -> Non
                 st.markdown(step)
 
 
-def _approver_options() -> list[tuple[str, str]]:
+def _approver_options() -> dict[str, str]:
     """
-    Return (label, user id) choices for the approver picker: the requester
+    Return label → user id choices for the approver picker: the requester
     first (to demo the guard rejecting it), then the yaml directory's users
     with their roles, then any settings-list approver ids not already shown.
     """
     options: dict[str, str] = {
         f"{_REQUESTER_ID} — the requester (watch the guard reject it)": _REQUESTER_ID,
     }
-    seen = {_REQUESTER_ID}
     for user in identity_users.load_users(pathlib.Path(settings.users_file)):
-        if user.slack_user_id and user.slack_user_id not in seen:
+        if user.slack_user_id and user.slack_user_id not in options.values():
             options[f"{user.name} ({user.role or 'no role'})"] = user.slack_user_id
-            seen.add(user.slack_user_id)
     for approver_id in sorted(settings.approver_ids):
-        if approver_id not in seen:
+        if approver_id not in options.values():
             options[f"{approver_id} (settings approver)"] = approver_id
-            seen.add(approver_id)
-    return list(options.items())
+    return options
 
 
 def _approval_card(*, chat_id: str, meta: dict[str, Any], steps: tuple[str, ...]) -> None:
@@ -553,8 +542,8 @@ def _approval_card(*, chat_id: str, meta: dict[str, Any], steps: tuple[str, ...]
         _thinking_expander(steps, expanded=True)
         st.warning(f"Human approval required: `{meta['pending_tool']}({meta['pending_args']})`")
         options = _approver_options()
-        picked = st.selectbox("Decide as", [label for label, _ in options])
-        resolver_id = dict(options)[picked]
+        picked = st.selectbox("Decide as", list(options))
+        resolver_id = options[picked]
         approve_col, reject_col = st.columns(2)
         approved = approve_col.button("Approve", type="primary")
         rejected = reject_col.button("Reject")

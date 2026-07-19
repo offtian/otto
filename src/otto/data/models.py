@@ -33,6 +33,12 @@ class ApprovalRecord(SQLModel, table=True):
     # run state after resolution (A9). Retention default: 30 days post-resolution
     # — confirm before the first audited requests land (2.1 is [NEEDS APPROVAL]).
     run_state_json: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    # Which surface owns the row ("slack" | "streamlit") — the sweep and the
+    # startup recovery act only on their own surface's approvals.
+    channel: str = Field(
+        default="slack",
+        sa_column=Column(String, nullable=False, server_default="slack", index=True),
+    )
     status: str = Field(index=True)
     card_channel: str = ""
     card_ts: str = ""

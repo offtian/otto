@@ -23,11 +23,11 @@ class TestApproverOptions:
 
         # Then the requester leads (to demo the guard rejecting it), the
         # directory user carries their role, and the env approver is offered
-        ids = [user_id for _, user_id in options]
+        ids = list(options.values())
         assert ids[0] == "U_STREAMLIT"
         assert "U_SAM" in ids
         assert "U_ENV" in ids
-        assert any("support_user" in label for label, _ in options)
+        assert any("support_user" in label for label in options)
 
 
 class TestBubbles:

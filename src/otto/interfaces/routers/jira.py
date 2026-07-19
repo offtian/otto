@@ -53,15 +53,14 @@ async def jira_webhook(
             )
         return fastapi.Response()
     support_request = webhook.to_support_request()
-    if support_request is None or not await request.app.state.kill_switch.enabled(
-        now=datetime.now(tz=UTC)
-    ):
+    now = datetime.now(tz=UTC)
+    if support_request is None or not await request.app.state.kill_switch.enabled(now=now):
         return fastapi.Response()
     if request.app.state.recent_events.seen(support_request.id):
         return fastapi.Response()
     # C2: global cap before the own-actor lookup and the LLM — a bulk
     # import/transition storm is acked, logged loudly, and dropped.
-    if not request.app.state.jira_rate_limiter.allow("jira", now=datetime.now(tz=UTC)):
+    if not request.app.state.jira_rate_limiter.allow("jira", now=now):
         logs.log_event("jira_rate_limited", params={"event_id": support_request.id})
         return fastapi.Response()
     if await _is_own_jira_actor(app_=request.app, jira=jira, actor_id=support_request.user_id):

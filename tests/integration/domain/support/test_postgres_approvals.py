@@ -11,6 +11,7 @@ import asyncio
 import os
 from datetime import UTC, datetime
 
+import attrs
 import databases
 import pytest
 
@@ -241,6 +242,21 @@ class TestPostgresApprovalStoreExecution:
 
         # Then neither is returned — pending owes no execution yet, expired never will
         assert unexecuted == []
+
+
+class TestPostgresApprovalStoreSurfaceIsolation:
+    async def test_another_surfaces_rows_are_left_alone_by_the_sweep(self, store):
+        # Given a pending dev-chat approval in the shared table
+        await store.save(attrs.evolve(_pending("ap-chat"), channel="streamlit"))
+
+        # When the server-side sweep expires everything in its (slack) scope
+        expired = await store.expire_pending(cutoff=FAR_FUTURE)
+
+        # Then the chat approval survives, channel intact
+        assert expired == []
+        fetched = await store.get("ap-chat")
+        assert fetched.status is approvals.ApprovalStatus.PENDING
+        assert fetched.channel == "streamlit"
 
 
 class TestPostgresApprovalStoreEvents:

@@ -10,6 +10,7 @@ structural — a gated tool executes only on an approved record — so
 the count empirically against the mock.
 """
 
+import collections
 import statistics
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -88,12 +89,8 @@ def build_audit_report(
     count, decision-latency (turnaround) statistics, and the rejected/system
     events recorded alongside the decisions (B5).
     """
-    by_status: dict[str, int] = {}
-    by_resolver: dict[str, int] = {}
-    for entry in entries:
-        by_status[entry.status] = by_status.get(entry.status, 0) + 1
-        if entry.resolver_id:
-            by_resolver[entry.resolver_id] = by_resolver.get(entry.resolver_id, 0) + 1
+    by_status = collections.Counter(entry.status for entry in entries)
+    by_resolver = collections.Counter(entry.resolver_id for entry in entries if entry.resolver_id)
     latencies = [e.latency_seconds for e in entries if e.latency_seconds is not None]
     return AuditReport(
         total=len(entries),
@@ -147,9 +144,7 @@ def render_report(report: AuditReport) -> str:
             + ", ".join(f"{name}={count}" for name, count in sorted(report.by_resolver.items()))
         )
     if report.events:
-        by_type: dict[str, int] = {}
-        for event in report.events:
-            by_type[event.event_type] = by_type.get(event.event_type, 0) + 1
+        by_type = collections.Counter(event.event_type for event in report.events)
         lines.append(
             "Rejected/system events:     "
             + ", ".join(f"{name}={count}" for name, count in sorted(by_type.items()))

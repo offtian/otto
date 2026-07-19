@@ -23,6 +23,17 @@ from otto.settings import settings
 from otto.utils import logs, telemetry
 
 
+async def _recover_safely() -> None:
+    """
+    Run the B2 startup recovery, logging instead of dying — an unobserved
+    task exception must not vanish.
+    """
+    try:
+        await support.recover_approvals()
+    except Exception as exc:
+        logs.log_exception(exc, params={"job": "approval_recovery"})
+
+
 async def _sweep_loop(interval_seconds: int) -> None:
     """
     Run the approval-maintenance sweep (2.5) every ``interval_seconds`` for the
@@ -129,24 +140,22 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
         # over its live connection (a failed mount degrades to its stub tool).
         await cfg.load_agents()
         # B2: execute any approval decided before a crash/restart whose run
-        # never completed — a human decision is carried out, never lost.
-        try:
-            await support.recover_approvals()
-        except Exception as exc:
-            logs.log_exception(exc, params={"job": "approval_recovery"})
+        # never completed — a human decision is carried out, never lost. In
+        # the background: each recovery is a full LLM run, and readiness must
+        # not wait on it (Slack retries against a closed port otherwise).
+        background_tasks = [asyncio.create_task(_recover_safely())]
         # Approval maintenance sweep (2.5): only meaningful against the durable
         # store, and the interval is a kill switch (0 = off).
-        sweep_task: asyncio.Task[None] | None = None
         if cfg.settings.database_url and cfg.settings.approval_sweep_interval_minutes > 0:
-            sweep_task = asyncio.create_task(
-                _sweep_loop(cfg.settings.approval_sweep_interval_minutes * 60)
+            background_tasks.append(
+                asyncio.create_task(_sweep_loop(cfg.settings.approval_sweep_interval_minutes * 60))
             )
         logs.log_event("app_started", params={"otto_enabled": cfg.settings.otto_enabled})
         yield
-        if sweep_task is not None:
-            sweep_task.cancel()
+        for task in background_tasks:
+            task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await sweep_task
+                await task
         for server in connected:
             await server.cleanup()  # type: ignore[no-untyped-call]  # SDK lacks annotations
 

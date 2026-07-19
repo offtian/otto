@@ -205,6 +205,31 @@ class TestInMemoryApprovalStoreExecution:
         assert unexecuted == []
 
 
+class TestInMemoryApprovalStoreSurfaceIsolation:
+    async def test_another_surfaces_rows_are_left_alone_by_sweep_and_recovery(self):
+        # Given one pending and one decided-but-unexecuted dev-chat approval
+        store = approvals.InMemoryApprovalStore()
+        await store.save(attrs.evolve(_pending(SLACK_ORIGIN), channel="streamlit"))
+        await store.save(
+            attrs.evolve(_pending(SLACK_ORIGIN), id="ap-chat-decided", channel="streamlit")
+        )
+        await store.resolve(
+            "ap-chat-decided", approvals.ApprovalStatus.APPROVED, resolver_id="U_SUPPORT"
+        )
+
+        # When the server-side sweep and recovery queries run (slack scope)
+        expired = await store.expire_pending(cutoff=FAR_FUTURE)
+        reminders = await store.claim_due_reminders(cutoff=FAR_FUTURE)
+        unexecuted = await store.list_unexecuted()
+
+        # Then the other surface's rows are untouched — the server must never
+        # close chat cards or replay chat-approved tools
+        assert expired == []
+        assert reminders == []
+        assert unexecuted == []
+        assert (await store.get("ap-1")).status is approvals.ApprovalStatus.PENDING
+
+
 class TestInMemoryApprovalStoreEvents:
     async def test_record_event_stamps_and_lists_in_order(self):
         # Given a store and two rejected-attempt events (B5)
