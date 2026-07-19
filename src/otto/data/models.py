@@ -8,7 +8,7 @@ this file grows past a handful of tables.
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, DateTime, Text
+from sqlalchemy import TIMESTAMP, Column, DateTime, ForeignKey, Index, String, Text, text
 from sqlmodel import Field, SQLModel
 
 
@@ -48,6 +48,75 @@ class ApprovalRecord(SQLModel, table=True):
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(tz=UTC),
         sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class AgentSessionRecord(SQLModel, table=True):
+    """
+    One conversation session — the openai-agents session store's parent table
+    (its items live in ``agent_messages``), extended with Otto's columns: the
+    channel tag (streamlit/slack), display title, the trace-root ids that keep
+    a whole conversation in one trace, and any paused HITL approval.
+
+    The SDK also writes this table (``agents.extensions.memory
+    .sqlalchemy_session``, pinned 0.18.2): it inserts bare ``session_id`` rows
+    when none exist and touches ``updated_at`` — so every Otto column must
+    keep a server default (or be nullable), and the SDK-shaped columns must
+    not drift from the SDK's definition.
+    """
+
+    __tablename__ = "agent_sessions"
+
+    session_id: str = Field(primary_key=True)
+    created_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(TIMESTAMP, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    )
+    updated_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(TIMESTAMP, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    )
+    channel: str = Field(
+        default="",
+        sa_column=Column(String, nullable=False, server_default="", index=True),
+    )
+    title: str = Field(default="", sa_column=Column(String, nullable=False, server_default=""))
+    # Root-span ids of the conversation's trace: every turn and approval
+    # parents into them, so one chat = one trace across process restarts.
+    trace_id: str = Field(default="", sa_column=Column(String, nullable=False, server_default=""))
+    span_id: str = Field(default="", sa_column=Column(String, nullable=False, server_default=""))
+    # Serialized RunState of a run paused for approval; null = nothing pending.
+    pending_state: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    pending_tool: str = Field(
+        default="", sa_column=Column(String, nullable=False, server_default="")
+    )
+    pending_args: str = Field(
+        default="", sa_column=Column(Text, nullable=False, server_default="")
+    )
+
+
+class AgentMessageRecord(SQLModel, table=True):
+    """
+    One stored conversation item, SDK-shaped (``message_data`` is the
+    serialized input item): the openai-agents session store owns all reads
+    and writes; this model only keeps alembic in charge of the schema.
+    """
+
+    __tablename__ = "agent_messages"
+    __table_args__ = (Index("idx_agent_messages_session_time", "session_id", "created_at"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    session_id: str = Field(
+        sa_column=Column(
+            String,
+            ForeignKey("agent_sessions.session_id", ondelete="CASCADE"),
+            nullable=False,
+        )
+    )
+    message_data: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(TIMESTAMP, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
     )
 
 
