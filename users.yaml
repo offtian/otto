@@ -4,9 +4,10 @@
 # team, so the self-approval exclusion works across channels and approvers
 # see who is asking (name + team) on approval cards.
 #
-# Approver ROLES do not live here — they stay in .env
-# (SUPPORT_USER_IDS / ADMIN_USER_IDS, decision D3) until the Phase 2 roles
-# table. Entitlement policy (who may have what) is SailPoint's job.
+# Approver roles may live here (role: support_user | admin) or in .env
+# (SUPPORT_USER_IDS / ADMIN_USER_IDS, decision D3); the Postgres users table
+# (2.3) replaces both in Phase 2. Entitlement policy (who may have what) is
+# SailPoint's job.
 #
 # users:
 #   - name: Alice Example
@@ -23,3 +24,11 @@ users:
     team: AI
     slack_user_id: otian
     jira_account_id: 5b10a2844c20165700ede21h
+
+  # Seeded approver for the dev-chat HITL demo (D1): authorized role + a Jira
+  # mapping, so both the happy path and ticket-origin resolves work untouched.
+  - name: Sam Support
+    team: IT Support
+    slack_user_id: sam.support
+    jira_account_id: 5b10a2844c20165700ede21s
+    role: support_user

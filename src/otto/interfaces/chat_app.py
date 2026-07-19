@@ -6,12 +6,18 @@ resume) — minus Slack itself.
 
 Conversations are durable, in the production Postgres: history lives in the
 Agents SDK's session store (``agent_sessions``/``agent_messages``), and the
-``agent_sessions`` row — channel-tagged ``streamlit``/``slack`` — also
-carries each chat's title, trace root, and any paused approval. A browser
-refresh or app restart keeps the conversation, its pending approval, and its
-place in the one-trace-per-conversation Langfuse trace. Streamlit is a
-dev-group dependency; this module is only run by `streamlit run`
-(just chat), never imported by the app.
+``agent_sessions`` row — channel-tagged ``streamlit`` — carries each chat's
+title, trace root, and the id of any paused approval. A browser refresh or
+app restart keeps the conversation, its pending approval, and its place in
+the one-trace-per-conversation Langfuse trace.
+
+Approvals are the real thing (D1, 2026-07-19): a paused run is saved to the
+production approval store, and the Approve/Reject buttons go through
+``support.resolve_approval`` under a *selectable* approver identity — the
+role check, the self-approval block, exactly-once resolution, and the audit
+rows all run exactly as they do for Slack. Otto's replies land back in the
+chat through a gateway stand-in. Streamlit is a dev-group dependency; this
+module is only run by `streamlit run` (just chat), never imported by the app.
 """
 
 import asyncio
@@ -30,9 +36,14 @@ from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
 from sqlalchemy.dialects import postgresql as pg
 
+from otto import config
+from otto.application import support as support_app
 from otto.data import db
 from otto.data import models as data_models
+from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
+from otto.domain.support import approvals as support_approvals
+from otto.domain.support import entities as support_entities
 from otto.settings import settings
 from otto.utils import telemetry
 from otto.vendors import llm
@@ -52,9 +63,12 @@ class _NoopTicketBackend:
 
 _tracer = otel_trace.get_tracer("otto.chat_app")
 
-# This surface's rows in the shared agent_sessions table; the Slack path
-# will tag its own as "slack".
+# This surface's rows in the shared agent_sessions table. Dev-chat-only by
+# decision (D21) — the Slack path stays on conversation reconstruction.
 _CHANNEL = "streamlit"
+# The fixed chat requester — deliberately role-less and unmapped, so picking
+# it as the approver demos the unauthorized-click rejection.
+_REQUESTER_ID = "U_STREAMLIT"
 _TABLE: sa.Table = data_models.AgentSessionRecord.__table__  # type: ignore[attr-defined]
 _MESSAGES: sa.Table = data_models.AgentMessageRecord.__table__  # type: ignore[attr-defined]
 
@@ -124,6 +138,56 @@ class _DatabaseSession:
         )
 
 
+class _ChatGateway:
+    """
+    The chat's stand-in for Slack inside the real approval use-case (D1):
+    origin replies and card close-outs are appended to the chat session as
+    assistant messages, so ``resolve_approval`` runs unmodified and the chat
+    re-renders whatever it said.
+    """
+
+    def __init__(self, database: databases.Database) -> None:
+        self._database = database
+
+    async def post_message(self, *, channel: str, text: str, thread_ts: str | None = None) -> str:
+        await _DatabaseSession(thread_ts or channel, self._database).add_items(
+            [{"role": "assistant", "content": text}]
+        )
+        return "chat"
+
+    async def update_message(self, *, channel: str, ts: str, text: str) -> None:
+        await _DatabaseSession(ts, self._database).add_items(
+            [{"role": "assistant", "content": text}]
+        )
+
+
+def _wire_runtime(database: databases.Database) -> config.Configuration:
+    """
+    Point the process-wide configuration at this event loop's resources: the
+    chat gateway, the durable stores over the given connection, the yaml user
+    directory, and a freshly-bound model/agent (the AsyncOpenAI client binds
+    to the loop of the current ``asyncio.run``). Mutating the singleton is
+    safe here — the chat surface is this process's only config consumer.
+    """
+    cfg = config.get_config()
+    model = llm.build_model(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model_name=settings.llm_model,
+    )
+    cfg.model = model
+    cfg.agent = support_agent.build_agent(model=model)
+    cfg.slack = _ChatGateway(database)  # type: ignore[assignment]
+    cfg.triage = _NoopTicketBackend()  # type: ignore[assignment]
+    cfg.jira = None
+    cfg.directory = identity_users.UserDirectory(
+        users=identity_users.load_users(pathlib.Path(settings.users_file))
+    )
+    cfg.approvals = support_approvals.PostgresApprovalStore(database=database)
+    agents.set_tracing_disabled(disabled=False)
+    return cfg
+
+
 def _create_chat(*, title: str) -> str:
     """
     Mint a chat: one root "chat" span opened (and ended) up front, its ids
@@ -178,14 +242,29 @@ def _list_chats() -> list[tuple[str, str]]:
     return asyncio.run(fetch())
 
 
-def _set_pending(chat_id: str, *, state: str | None, tool: str | None, args: str | None) -> None:
+async def _write_pending(
+    database: databases.Database,
+    chat_id: str,
+    *,
+    approval_id: str | None,
+    tool: str | None,
+    args: str | None,
+) -> None:
+    # pending_state carries the paused approval's id (D1) — the RunState
+    # itself lives in the real approvals store, exactly as it does for Slack.
+    await database.execute(
+        sa.update(_TABLE)
+        .where(_TABLE.c.session_id == chat_id)
+        .values(pending_state=approval_id, pending_tool=tool or "", pending_args=args or "")
+    )
+
+
+def _set_pending(
+    chat_id: str, *, approval_id: str | None, tool: str | None, args: str | None
+) -> None:
     async def update() -> None:
         async with db.database() as database:
-            await database.execute(
-                sa.update(_TABLE)
-                .where(_TABLE.c.session_id == chat_id)
-                .values(pending_state=state, pending_tool=tool or "", pending_args=args or "")
-            )
+            await _write_pending(database, chat_id, approval_id=approval_id, tool=tool, args=args)
 
     asyncio.run(update())
 
@@ -236,25 +315,52 @@ async def _run_turn(chat_id: str, question: str) -> agents.RunResult:
         return await agents.Runner.run(agent, question, context=context, session=session)
 
 
-async def _resume(chat_id: str, state_json: str, *, approved: bool) -> agents.RunResult:
-    # Same round-trip as the Slack integration (application/support.py):
-    # deserialize the RunState, re-supply the context via override (approvals
-    # are recorded on the state's context wrapper), then continue the run.
-    # Passing the same session keeps the stored history in sync — the SDK
-    # dedupes items already persisted by the interrupted run.
-    agent, context = _build()
-    state = await agents.RunState.from_string(
-        agent,
-        state_json,
-        context_override=agents.RunContextWrapper(context=context),
-    )
-    for interruption in state.get_interruptions():
-        if approved:
-            state.approve(interruption)
-        else:
-            state.reject(interruption)
+async def _pause(chat_id: str, result: agents.RunResult, *, question: str) -> None:
+    """
+    Save the interrupted run as a real ``PendingApproval`` in the production
+    approval store (D1) and note its id on the session row so the card
+    survives reruns and restarts.
+    """
+    interruptions = result.interruptions
+    tool = " + ".join(dict.fromkeys(getattr(i.raw_item, "name", "tool") for i in interruptions))
+    args = "; ".join(str(getattr(i.raw_item, "arguments", "")) for i in interruptions)
+    approval_id = str(uuid.uuid4())
     async with db.database() as database:
-        return await agents.Runner.run(agent, state, session=_DatabaseSession(chat_id, database))
+        await support_approvals.PostgresApprovalStore(database=database).save(
+            support_approvals.PendingApproval(
+                id=approval_id,
+                request_id=chat_id,
+                requester_id=_REQUESTER_ID,
+                origin=support_entities.SlackThread(channel_id=_CHANNEL, thread_ts=chat_id),
+                request_text=question,
+                tool_name=tool,
+                tool_arguments=args,
+                run_state_json=result.to_state().to_string(),
+                card_channel=_CHANNEL,
+                card_ts=chat_id,
+            )
+        )
+        await _write_pending(database, chat_id, approval_id=approval_id, tool=tool, args=args)
+
+
+async def _resolve(chat_id: str, approval_id: str, *, resolver_id: str, approved: bool) -> None:
+    """
+    Apply the decision through the real use-case: role check, self-approval
+    block, exactly-once resolve, audit rows, resume, and the outcome message —
+    identical to a Slack card click (D1). An unauthorized click leaves the
+    approval pending; its polite rejection lands in the chat via the gateway.
+    """
+    async with db.database() as database:
+        cfg = _wire_runtime(database)
+        await support_app.resolve_approval(
+            approval_id=approval_id, resolver_id=resolver_id, approved=approved
+        )
+        try:
+            pending = await cfg.approvals.get(approval_id)
+        except support_approvals.ApprovalNotFound:
+            pending = None
+        if pending is None or pending.status is not support_approvals.ApprovalStatus.PENDING:
+            await _write_pending(database, chat_id, approval_id=None, tool=None, args=None)
 
 
 async def _chat_items(chat_id: str) -> list[Any]:
@@ -328,22 +434,16 @@ def _bubbles(items: list[Any]) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
     return bubbles, tuple(steps)
 
 
-def _absorb(result: agents.RunResult, *, chat_id: str) -> None:
+def _absorb(result: agents.RunResult, *, chat_id: str, question: str) -> None:
     # The UI-visible thinking bundle rides the enclosing chat_turn/chat_approval
     # span, so the trace shows exactly what the user saw. Dev only (C3): the
     # steps carry tool outputs — KB content — which must not export elsewhere.
     if settings.environment == "dev":
         otel_trace.get_current_span().set_attribute("otto.thinking_steps", list(_steps(result)))
     if result.interruptions:
-        raw = result.interruptions[0].raw_item
-        _set_pending(
-            chat_id,
-            state=result.to_state().to_string(),
-            tool=getattr(raw, "name", "tool"),
-            args=getattr(raw, "arguments", ""),
-        )
+        asyncio.run(_pause(chat_id, result, question=question))
     else:
-        _set_pending(chat_id, state=None, tool=None, args=None)
+        _set_pending(chat_id, approval_id=None, tool=None, args=None)
     logfire.force_flush()  # make the trace visible in Tempo/Langfuse right away
 
 
@@ -408,7 +508,7 @@ def _sidebar(*, chat_id: str | None, pending: bool) -> None:
                 if st.button(example, width="stretch", disabled=pending):
                     st.session_state.queued_question = example
         # Lower section: jump back into any stored conversation. Chats live in
-        # sqlite, so the list — messages, pending approvals, trace roots —
+        # Postgres, so the list — messages, pending approvals, trace roots —
         # survives refreshes and restarts.
         past_chats = [(sid, title) for sid, title in _list_chats() if sid != chat_id]
         if past_chats:
@@ -427,26 +527,59 @@ def _thinking_expander(steps: tuple[str, ...], *, expanded: bool = False) -> Non
                 st.markdown(step)
 
 
+def _approver_options() -> list[tuple[str, str]]:
+    """
+    Return (label, user id) choices for the approver picker: the requester
+    first (to demo the guard rejecting it), then the yaml directory's users
+    with their roles, then any settings-list approver ids not already shown.
+    """
+    options: dict[str, str] = {
+        f"{_REQUESTER_ID} — the requester (watch the guard reject it)": _REQUESTER_ID,
+    }
+    seen = {_REQUESTER_ID}
+    for user in identity_users.load_users(pathlib.Path(settings.users_file)):
+        if user.slack_user_id and user.slack_user_id not in seen:
+            options[f"{user.name} ({user.role or 'no role'})"] = user.slack_user_id
+            seen.add(user.slack_user_id)
+    for approver_id in sorted(settings.approver_ids):
+        if approver_id not in seen:
+            options[f"{approver_id} (settings approver)"] = approver_id
+            seen.add(approver_id)
+    return list(options.items())
+
+
 def _approval_card(*, chat_id: str, meta: dict[str, Any], steps: tuple[str, ...]) -> None:
     with st.chat_message("assistant"):
         _thinking_expander(steps, expanded=True)
         st.warning(f"Human approval required: `{meta['pending_tool']}({meta['pending_args']})`")
+        options = _approver_options()
+        picked = st.selectbox("Decide as", [label for label, _ in options])
+        resolver_id = dict(options)[picked]
         approve_col, reject_col = st.columns(2)
         approved = approve_col.button("Approve", type="primary")
         rejected = reject_col.button("Reject")
         if approved or rejected:
             with (
-                st.spinner("Resuming…"),
+                st.spinner("Resolving…"),
                 _tracer.start_as_current_span(
                     "chat_approval",
                     context=_trace_context(meta),
-                    attributes={"approved": approved, "chat_id": chat_id},
+                    attributes={
+                        "approved": approved,
+                        "chat_id": chat_id,
+                        "resolver_id": resolver_id,
+                    },
                 ),
             ):
-                _absorb(
-                    asyncio.run(_resume(chat_id, meta["pending_state"], approved=approved)),
-                    chat_id=chat_id,
+                asyncio.run(
+                    _resolve(
+                        chat_id,
+                        meta["pending_state"],
+                        resolver_id=resolver_id,
+                        approved=approved,
+                    )
                 )
+                logfire.force_flush()
             st.rerun()
 
 
@@ -482,7 +615,7 @@ def _ask(*, question: str) -> None:
             attributes={"question": question, "chat_id": chat_id},
         ),
     ):
-        _absorb(asyncio.run(_run_turn(chat_id, question)), chat_id=chat_id)
+        _absorb(asyncio.run(_run_turn(chat_id, question)), chat_id=chat_id, question=question)
     st.rerun()
 
 

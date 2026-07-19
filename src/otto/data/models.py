@@ -126,7 +126,8 @@ class AgentSessionRecord(SQLModel, table=True):
     # parents into them, so one chat = one trace across process restarts.
     trace_id: str = Field(default="", sa_column=Column(String, nullable=False, server_default=""))
     span_id: str = Field(default="", sa_column=Column(String, nullable=False, server_default=""))
-    # Serialized RunState of a run paused for approval; null = nothing pending.
+    # Id of the paused approval in the approvals store (D1) — the RunState
+    # lives there, exactly as for Slack; null = nothing pending.
     pending_state: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     pending_tool: str = Field(
         default="", sa_column=Column(String, nullable=False, server_default="")
