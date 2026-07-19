@@ -112,6 +112,20 @@ class Configuration(pydantic.BaseModel):
         self.triage = slack_vendor.SlackTriageBackend(
             gateway=self.slack,
             triage_channel=self.settings.slack_triage_channel,
+            # Escalation team routing (D24): LLM stand-in until the firm
+            # classification API replaces it behind the same seam. No teams
+            # configured = no classifier = the single channel, as before.
+            classifier=(
+                llm.build_team_classifier(
+                    base_url=self.settings.llm_base_url,
+                    api_key=self.settings.llm_api_key,
+                    model_name=self.settings.llm_model,
+                    teams=self.settings.team_list,
+                )
+                if self.settings.support_teams
+                else None
+            ),
+            team_channels=self.settings.team_channel_map,
         )
         self.jira = (
             jira_vendor.JiraGateway(

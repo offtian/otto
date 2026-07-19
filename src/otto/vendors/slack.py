@@ -6,6 +6,9 @@ to; ``SlackTriageBackend`` structurally implements the domain
 ``TicketBackend`` protocol by escalating into a human triage channel.
 """
 
+from collections.abc import Mapping
+from typing import Protocol
+
 import attrs
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -218,10 +221,22 @@ class SlackGateway:
         return str(response["ts"])
 
 
+class TeamClassifier(Protocol):
+    """
+    Assigns an escalation to a team, or None when unsure. Satisfied
+    structurally by ``vendors.llm.LLMTeamClassifier`` today and the firm
+    classification API adapter at graduation (D24).
+    """
+
+    async def classify(self, *, text: str) -> str | None: ...
+
+
 @attrs.frozen
 class SlackTriageBackend:
     """
-    Escalation backend that routes to a human triage channel.
+    Escalation backend that routes to a human triage channel — per assigned
+    team when a classifier and a team→channel map are configured (D24),
+    the single default channel otherwise.
 
     Structurally satisfies ``domain.support.escalation.TicketBackend``;
     swap for a ServiceNow/Jira adapter without touching the agent.
@@ -229,6 +244,8 @@ class SlackTriageBackend:
 
     gateway: SlackGateway
     triage_channel: str
+    classifier: TeamClassifier | None = None
+    team_channels: Mapping[str, str] = attrs.field(factory=dict)
 
     async def escalate(
         self,
@@ -240,16 +257,27 @@ class SlackTriageBackend:
         origin_ref: str,
     ) -> str:
         """
-        Post a structured escalation card to the triage channel and return
-        a triage reference.
+        Post a structured escalation card to the assigned team's triage
+        channel (default channel when unclassified) and return a triage
+        reference.
         """
+        team = (
+            await self.classifier.classify(text=f"{subject}\n{summary}")
+            if self.classifier is not None
+            else None
+        )
+        team_line = f"*Assigned team:* {team}\n" if team else ""
         text = (
             f":rotating_light: *Escalation* ({urgency}) — {subject}\n"
+            f"{team_line}"
             f"*From:* <@{requester_id}>\n"
             f"*Summary:* {summary}\n"
             f"*Origin:* {origin_ref}"
         )
+        channel = (
+            self.team_channels.get(team, self.triage_channel) if team else self.triage_channel
+        )
         ts = await self.gateway.post_escalation(
-            channel=self.triage_channel, text=text, resolve_value=origin_ref
+            channel=channel, text=text, resolve_value=origin_ref
         )
         return f"triage#{ts}"

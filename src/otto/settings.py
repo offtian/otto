@@ -66,6 +66,16 @@ class Settings(BaseSettings):
     support_user_ids: str = ""
     admin_user_ids: str = ""
 
+    # Escalation team routing (D24 stand-in): comma-separated team names an
+    # LLM classifier may assign an escalation to. Empty = routing disabled —
+    # everything lands in the single triage channel as before. The firm
+    # classification API replaces the LLM classifier at graduation behind
+    # the same seam.
+    support_teams: str = ""
+    # "Team:CHANNEL_ID" pairs, comma-separated. An unclassified escalation or
+    # an unmapped team falls back to slack_triage_channel.
+    team_triage_channels: str = ""
+
     # Max messages of conversation history rebuilt per event (D2).
     thread_history_limit: int = 30
 
@@ -118,6 +128,21 @@ class Settings(BaseSettings):
         """
         raw = f"{self.support_user_ids},{self.admin_user_ids}"
         return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+    @property
+    def team_list(self) -> tuple[str, ...]:
+        """
+        Return the routing taxonomy the classifier may assign to.
+        """
+        return tuple(part.strip() for part in self.support_teams.split(",") if part.strip())
+
+    @property
+    def team_channel_map(self) -> dict[str, str]:
+        """
+        Return team → triage-channel-id pairs from ``team_triage_channels``.
+        """
+        pairs = (part.partition(":") for part in self.team_triage_channels.split(","))
+        return {team.strip(): channel.strip() for team, _, channel in pairs if channel.strip()}
 
 
 # Module-level singleton — the sanctioned direct-object import (the one

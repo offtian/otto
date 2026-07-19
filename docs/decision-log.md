@@ -7,6 +7,12 @@ this log preserves *how we got there*.
 
 ---
 
+## 2026-07-19 — Escalation team routing behind the D24 seam (D25)
+
+| ID | Decision | Status | Notes |
+|---|---|---|---|
+| D25 | **Escalations route per assigned team via an LLM classifier stand-in.** `SlackTriageBackend` takes an optional `TeamClassifier` (structural protocol) + a team→channel map from settings (`SUPPORT_TEAMS`, `TEAM_TRIAGE_CHANNELS`); `vendors.llm.LLMTeamClassifier` is one zero-shot completion against the configured gateway. **Fail-open in every direction**: no teams configured, an off-taxonomy reply, an unmapped team, or a gateway error all fall back to the single triage channel — routing can never block or lose an escalation. | Applied (unit-tested + live-verified against Ollama) | This is the D24 *seam*, not the D24 *answer*: the firm classification API replaces `LLMTeamClassifier` behind the same `classify` protocol at graduation, and the E1 taxonomy/volume export is still required for the value-ceiling analysis. Classified-but-unmapped teams still name the team on the card so humans can route manually. Admission control on `/jira/webhook` (the other D24 use) stays graduation-gated — it needs the *real* classifier's precision, not a dev stand-in's. |
+
 ## 2026-07-19 — Blind-spot audit round 2: dev-chat surface, observability, classifier (D21–D24)
 
 Records the 07-18/19 work that landed undocumented, plus the decisions from the

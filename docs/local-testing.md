@@ -107,6 +107,18 @@ just jira-fire-all                     # question, access, follow-up, resolved
 A burst beyond `JIRA_EVENTS_PER_MINUTE` (default 30) is acked, logged as
 `jira_rate_limited`, and dropped before it costs an LLM call (C2).
 
+**Escalation team routing (D25)** — optional; empty settings keep the single
+triage channel:
+
+```bash
+SUPPORT_TEAMS=Network,Identity & Access,Endpoint
+TEAM_TRIAGE_CHANNELS=Network:C_NET,Identity & Access:C_IAM
+```
+
+An LLM stand-in for the firm classifier assigns each escalation to a team and
+posts it to that team's channel; anything unclassified, unmapped, or errored
+falls back to the default channel — routing never blocks an escalation.
+
 **Housekeeping:**
 
 ```bash
