@@ -16,7 +16,7 @@ import fastapi
 from agents import mcp as agents_mcp
 
 from otto import config
-from otto.application import support
+from otto.application import killswitch, support
 from otto.data import db
 from otto.interfaces.routers import base, jira, slack
 from otto.settings import settings
@@ -154,6 +154,12 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
 app = fastapi.FastAPI(title="otto", lifespan=_lifespan)
 app.state.recent_events = _RecentIds()
 app.state.rate_limiter = _RateLimiter(per_minute=settings.slack_user_rate_limit_per_minute)
+# Global Jira intake cap (C2): a bulk import/transition storm is bounded
+# before it becomes agent runs and ticket comments.
+app.state.jira_rate_limiter = _RateLimiter(per_minute=settings.jira_events_per_minute)
+# Runtime kill switch (C1): DB flag consulted per request, env default as
+# fallback — flip with `just otto-off` / `just otto-on`, no restart.
+app.state.kill_switch = killswitch.KillSwitch()
 # Otto's own Jira account id, fetched lazily on the first webhook (FR9
 # own-actor loop guard). None = not yet established.
 app.state.jira_bot_account_id = None

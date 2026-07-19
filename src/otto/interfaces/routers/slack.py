@@ -40,7 +40,7 @@ async def slack_events(
         return fastapi.responses.JSONResponse({"challenge": envelope.challenge})
     if request.app.state.recent_events.seen(envelope.event_id):
         return fastapi.Response()
-    if not cfg.settings.otto_enabled:
+    if not await request.app.state.kill_switch.enabled(now=datetime.now(tz=UTC)):
         return fastapi.Response()
     greeting = envelope.to_assistant_greeting()
     if greeting is not None:
@@ -68,7 +68,9 @@ async def slack_interactions(
     )
     form = urllib.parse.parse_qs(body.decode("utf-8"))
     interaction = schemas.SlackInteraction.parse(json.loads(form.get("payload", ["{}"])[0]))
-    if interaction is None or not cfg.settings.otto_enabled:
+    if interaction is None or not await request.app.state.kill_switch.enabled(
+        now=datetime.now(tz=UTC)
+    ):
         return fastapi.Response()
     decision = interaction.to_approval_decision()
     if decision is not None:

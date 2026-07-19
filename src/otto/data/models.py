@@ -57,6 +57,20 @@ class ApprovalRecord(SQLModel, table=True):
     )
 
 
+class RuntimeFlagRecord(SQLModel, table=True):
+    """
+    One runtime-tunable flag (C1): today only ``otto_enabled`` — the kill
+    switch the routers consult per request, flippable without a restart
+    (``just otto-off`` / ``just otto-on``). An absent row means the env
+    default applies.
+    """
+
+    __tablename__ = "runtime_flags"
+
+    name: str = Field(primary_key=True)
+    value: str
+
+
 class AuditEventRecord(SQLModel, table=True):
     """
     One rejected or system-driven HITL event (B5): unauthorized clicks,

@@ -9,7 +9,7 @@ from fastapi import testclient
 from slack_sdk.signature import SignatureVerifier
 
 from otto import config
-from otto.application import support
+from otto.application import killswitch, support
 from otto.domain.identity import users
 from otto.domain.support import approvals, entities
 from otto.interfaces import app as otto_app
@@ -68,6 +68,10 @@ def client(monkeypatch):
     otto_app.app.state.rate_limiter = otto_app._RateLimiter(
         per_minute=settings.slack_user_rate_limit_per_minute
     )
+    otto_app.app.state.jira_rate_limiter = otto_app._RateLimiter(
+        per_minute=settings.jira_events_per_minute
+    )
+    otto_app.app.state.kill_switch = killswitch.KillSwitch()
     otto_app.app.state.jira_bot_account_id = None
     return testclient.TestClient(otto_app.app), cfg
 
@@ -424,6 +428,22 @@ class TestJiraWebhook:
                 origin=entities.TicketRef(issue_key="IT-1"),
             )
         )
+
+    def test_a_webhook_storm_is_capped_before_the_llm(self, client, monkeypatch):
+        # Given a handler spy and a global Jira cap of 2 events per minute (C2)
+        http, _ = client
+        otto_app.app.state.jira_rate_limiter = otto_app._RateLimiter(per_minute=2)
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+
+        # When a burst of distinct issue-created events arrives
+        for issue_id in ("30001", "30002", "30003", "30004"):
+            response = http.post(JIRA_URL, content=_jira_issue_payload(issue_id=issue_id))
+            # Then every event is still acked — Jira must not retry
+            assert response.status_code == 200
+
+        # Then only the capped number were dispatched; the rest were dropped
+        assert handler.await_count == 2
 
     def test_dispatches_a_user_comment(self, client, monkeypatch):
         # Given a handler spy

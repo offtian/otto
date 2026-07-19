@@ -330,8 +330,10 @@ def _bubbles(items: list[Any]) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
 
 def _absorb(result: agents.RunResult, *, chat_id: str) -> None:
     # The UI-visible thinking bundle rides the enclosing chat_turn/chat_approval
-    # span, so the trace shows exactly what the user saw.
-    otel_trace.get_current_span().set_attribute("otto.thinking_steps", list(_steps(result)))
+    # span, so the trace shows exactly what the user saw. Dev only (C3): the
+    # steps carry tool outputs — KB content — which must not export elsewhere.
+    if settings.environment == "dev":
+        otel_trace.get_current_span().set_attribute("otto.thinking_steps", list(_steps(result)))
     if result.interruptions:
         raw = result.interruptions[0].raw_item
         _set_pending(

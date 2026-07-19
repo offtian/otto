@@ -48,7 +48,18 @@ class Settings(BaseSettings):
     jira_webhook_secret: str = ""
 
     # Kill switch (FR8): false = events are acked but Otto never replies.
+    # The env value is the default; with a database configured, a
+    # `runtime_flags` row named otto_enabled overrides it at runtime
+    # (C1: `just otto-off` / `just otto-on`, no restart needed).
     otto_enabled: bool = True
+    # How long a runtime kill-switch read is cached — the worst-case latency
+    # between flipping the flag and Otto going quiet.
+    kill_switch_cache_seconds: int = 10
+
+    # Global Jira webhook dispatch cap per rolling minute (C2): a bulk
+    # import/transition storm must not become N agent runs and N comments.
+    # 0 disables. In-process (single replica) — Redis before replicas > 1.
+    jira_events_per_minute: int = 30
 
     # Approver allowlists (D3) — comma-separated Slack user ids. A Postgres
     # roles table replaces these in Phase 2.

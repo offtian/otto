@@ -124,6 +124,19 @@ downgrade-db-migration:
 audit-report:
     PYTHONPATH=src uv run python -m otto.interfaces.audit_report
 
+# Silence Otto at runtime (C1 kill switch — takes effect within the cache TTL, no restart)
+otto-off:
+    docker compose exec -T postgres psql -U postgres -d otto -c "INSERT INTO runtime_flags (name, value) VALUES ('otto_enabled', 'false') ON CONFLICT (name) DO UPDATE SET value = 'false'"
+
+# Re-enable Otto's replies at runtime
+otto-on:
+    docker compose exec -T postgres psql -U postgres -d otto -c "INSERT INTO runtime_flags (name, value) VALUES ('otto_enabled', 'true') ON CONFLICT (name) DO UPDATE SET value = 'true'"
+
+# Purge dev-chat sessions idle longer than DAYS days (C3 — session PII);
+# chats with a pending approval are spared, messages cascade with the session.
+purge-chats DAYS="30":
+    docker compose exec -T postgres psql -U postgres -d otto -c "DELETE FROM agent_sessions WHERE updated_at < now() - interval '{{ DAYS }} days' AND pending_state IS NULL"
+
 # Fake payloads (local trace testing)
 # -----------------------------------
 
