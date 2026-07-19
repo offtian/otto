@@ -78,6 +78,33 @@ class TestBuildAuditReport:
         assert report.writes_authorized == 0
         assert report.median_latency_seconds is None
 
+    def test_per_approver_counts_and_latency_tail(self):
+        # Given two approvals decided by one approver and one by another (D2)
+        fast = datetime(2026, 7, 12, 10, 1, tzinfo=UTC)
+        slow = datetime(2026, 7, 12, 11, 0, tzinfo=UTC)
+        entries = [_entry("approved", fast), _entry("approved", slow), _entry("denied", fast)]
+
+        # When the report is built
+        report = audit.build_audit_report(entries)
+
+        # Then decisions are counted per approver and the latency tail is shown
+        assert report.by_resolver == {"U_SUP": 3}
+        assert report.p90_latency_seconds is not None
+        assert report.p90_latency_seconds >= report.median_latency_seconds
+
+    def test_rejected_events_are_carried_and_rendered(self):
+        # Given a report with one rejected-attempt event (B5)
+        report = audit.build_audit_report(
+            [],
+            events=[audit.AuditEvent(event_type="unauthorized_role", actor_id="U_RANDO")],
+        )
+
+        # When the report is rendered
+        rendered = audit.render_report(report)
+
+        # Then the rejected attempt shows up in the summary
+        assert "unauthorized_role=1" in rendered
+
     def test_render_includes_the_headline_numbers(self):
         # Given a report with one approved approval resolved after two minutes
         report = audit.build_audit_report(

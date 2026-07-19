@@ -74,6 +74,10 @@ class AuditReport:
     max_latency_seconds: float | None
     entries: tuple[AuditEntry, ...]
     events: tuple[AuditEvent, ...] = ()
+    # Per-approver decision counts and the latency tail (D2): the pilot's
+    # answer to the approver-volume/diligence question — measured, not guessed.
+    by_resolver: Mapping[str, int] = attrs.field(factory=dict)
+    p90_latency_seconds: float | None = None
 
 
 def build_audit_report(
@@ -85,8 +89,11 @@ def build_audit_report(
     events recorded alongside the decisions (B5).
     """
     by_status: dict[str, int] = {}
+    by_resolver: dict[str, int] = {}
     for entry in entries:
         by_status[entry.status] = by_status.get(entry.status, 0) + 1
+        if entry.resolver_id:
+            by_resolver[entry.resolver_id] = by_resolver.get(entry.resolver_id, 0) + 1
     latencies = [e.latency_seconds for e in entries if e.latency_seconds is not None]
     return AuditReport(
         total=len(entries),
@@ -96,7 +103,21 @@ def build_audit_report(
         max_latency_seconds=max(latencies) if latencies else None,
         entries=tuple(entries),
         events=tuple(events),
+        by_resolver=by_resolver,
+        p90_latency_seconds=_p90(latencies),
     )
+
+
+def _p90(latencies: Sequence[float]) -> float | None:
+    """
+    Return the 90th-percentile latency — the tail the median hides. With a
+    single sample the sample is the tail.
+    """
+    if not latencies:
+        return None
+    if len(latencies) == 1:
+        return latencies[0]
+    return statistics.quantiles(latencies, n=10)[-1]
 
 
 def render_report(report: AuditReport) -> str:
@@ -115,9 +136,16 @@ def render_report(report: AuditReport) -> str:
     ]
     if report.median_latency_seconds is not None and report.max_latency_seconds is not None:
         lines.append(f"Median decision turnaround:  {report.median_latency_seconds / 60:.1f} min")
+        if report.p90_latency_seconds is not None:
+            lines.append(f"P90 decision turnaround:     {report.p90_latency_seconds / 60:.1f} min")
         lines.append(f"Max decision turnaround:     {report.max_latency_seconds / 60:.1f} min")
     else:
         lines.append("Decision turnaround:         n/a (no resolved approvals)")
+    if report.by_resolver:
+        lines.append(
+            "Decisions per approver:     "
+            + ", ".join(f"{name}={count}" for name, count in sorted(report.by_resolver.items()))
+        )
     if report.events:
         by_type: dict[str, int] = {}
         for event in report.events:
