@@ -8,17 +8,14 @@ import asyncio
 import sys
 
 from otto.application import audit as audit_app
-from otto.data import db as data_db
+from otto.data import db
 from otto.domain.support import audit as audit_domain
 from otto.utils import logs
 
 
 async def _run() -> None:
-    await data_db.connect_db()
-    try:
+    async with db.database():
         report = await audit_app.generate_audit_report()
-    finally:
-        await data_db.disconnect_db()
     logs.log_event(
         "audit_report_generated",
         params={"total": report.total, "writes_authorized": report.writes_authorized},

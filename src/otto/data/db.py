@@ -1,13 +1,18 @@
 """
 Async database singleton using the ``databases`` library.
 
-Provides a single ``databases.Database`` instance shared across the
-application. All entry points call ``connect_db()`` on startup and
-``disconnect_db()`` on shutdown; queries go through ``get_db()``.
+One connection util for every application: ``database()`` connects the
+shared pool for the duration of its block and yields it — an app lifespan
+holds it open for the process lifetime, a CLI or Streamlit interaction
+holds it per call. Code inside the block may also reach the pool via
+``get_db()``.
 
 Schema lives in ``models.py`` (SQLModel metadata) and is applied via
 alembic migrations — the ``databases`` library is the runtime query layer.
 """
+
+import contextlib
+from collections.abc import AsyncIterator
 
 import databases
 
@@ -36,15 +41,22 @@ def get_db() -> databases.Database:
     return _db
 
 
-async def connect_db() -> None:
-    """Open the database connection pool. Call during application startup."""
+@contextlib.asynccontextmanager
+async def database() -> AsyncIterator[databases.Database]:
+    """
+    Connect the shared pool for the duration of the block and yield it.
+
+    On exit the pool is closed and the singleton reset, so the next block
+    starts fresh — required by callers that open one block per event loop
+    (each Streamlit interaction runs its own ``asyncio.run()``).
+
+    :raises RuntimeError: if DATABASE_URL is not configured.
+    """
+    global _db  # noqa: PLW0603
     db = get_db()
     await db.connect()
-
-
-async def disconnect_db() -> None:
-    """Close the database connection pool and reset the singleton."""
-    global _db  # noqa: PLW0603
-    if _db is not None:
-        await _db.disconnect()
+    try:
+        yield db
+    finally:
+        await db.disconnect()
         _db = None

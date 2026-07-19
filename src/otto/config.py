@@ -22,7 +22,7 @@ import pydantic
 from agents.models import interface as model_interface
 from slack_sdk.web.async_client import AsyncWebClient
 
-from otto.data import db as data_db
+from otto.data import db
 from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals as support_approvals
@@ -132,8 +132,8 @@ class Configuration(pydantic.BaseModel):
         zero-dependency dev loop when DATABASE_URL is empty.
         """
         if self.settings.database_url:
-            self.directory = identity_users.PostgresUserDirectory(database=data_db.get_db())
-            self.approvals = support_approvals.PostgresApprovalStore(database=data_db.get_db())
+            self.directory = identity_users.PostgresUserDirectory(database=db.get_db())
+            self.approvals = support_approvals.PostgresApprovalStore(database=db.get_db())
         else:
             self.directory = identity_users.UserDirectory(
                 users=identity_users.load_users(pathlib.Path(self.settings.users_file))

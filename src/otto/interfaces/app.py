@@ -17,7 +17,7 @@ from agents import mcp as agents_mcp
 
 from otto import config
 from otto.application import support
-from otto.data import db as data_db
+from otto.data import db
 from otto.interfaces.routers import base, jira, slack
 from otto.settings import settings
 from otto.utils import logs, telemetry
@@ -105,42 +105,44 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
         langfuse_secret_key=cfg.settings.langfuse_secret_key,
     )
     telemetry.instrument_app(started_app)
-    if cfg.settings.database_url:
-        await data_db.connect_db()  # durable approval store (Phase 2)
-    servers = [
-        mount.server for mount in (cfg.confluence_mcp, cfg.sailpoint_mcp) if mount is not None
-    ]
-    connected: list[agents_mcp.MCPServerStreamableHttp] = []
-    for server in servers:
-        try:
-            await server.connect()  # type: ignore[no-untyped-call]  # SDK method lacks annotations
-        except Exception as exc:
-            # A misconfigured or unavailable MCP degrades its own capability
-            # (its tool errors per request, caught by FR8) — it must never take
-            # the whole service down at startup.
-            logs.log_exception(exc, params={"mcp_connect": type(server).__name__})
-            continue
-        connected.append(server)
-    # After connect on purpose: wiring the agent pulls each mount's tool list
-    # over its live connection (a failed mount degrades to its stub tool).
-    await cfg.load_agents()
-    # Approval maintenance sweep (2.5): only meaningful against the durable
-    # store, and the interval is a kill switch (0 = off).
-    sweep_task: asyncio.Task[None] | None = None
-    if cfg.settings.database_url and cfg.settings.approval_sweep_interval_minutes > 0:
-        sweep_task = asyncio.create_task(
-            _sweep_loop(cfg.settings.approval_sweep_interval_minutes * 60)
-        )
-    logs.log_event("app_started", params={"otto_enabled": cfg.settings.otto_enabled})
-    yield
-    if sweep_task is not None:
-        sweep_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await sweep_task
-    for server in connected:
-        await server.cleanup()  # type: ignore[no-untyped-call]  # SDK method lacks annotations
-    if cfg.settings.database_url:
-        await data_db.disconnect_db()
+    async with contextlib.AsyncExitStack() as stack:
+        if cfg.settings.database_url:
+            # Durable approval store (Phase 2): the shared pool stays open for
+            # the process lifetime and closes last on shutdown (the sweep and
+            # MCP teardown above it may still query).
+            await stack.enter_async_context(db.database())
+        servers = [
+            mount.server for mount in (cfg.confluence_mcp, cfg.sailpoint_mcp) if mount is not None
+        ]
+        connected: list[agents_mcp.MCPServerStreamableHttp] = []
+        for server in servers:
+            try:
+                await server.connect()  # type: ignore[no-untyped-call]  # SDK lacks annotations
+            except Exception as exc:
+                # A misconfigured or unavailable MCP degrades its own capability
+                # (its tool errors per request, caught by FR8) — it must never take
+                # the whole service down at startup.
+                logs.log_exception(exc, params={"mcp_connect": type(server).__name__})
+                continue
+            connected.append(server)
+        # After connect on purpose: wiring the agent pulls each mount's tool list
+        # over its live connection (a failed mount degrades to its stub tool).
+        await cfg.load_agents()
+        # Approval maintenance sweep (2.5): only meaningful against the durable
+        # store, and the interval is a kill switch (0 = off).
+        sweep_task: asyncio.Task[None] | None = None
+        if cfg.settings.database_url and cfg.settings.approval_sweep_interval_minutes > 0:
+            sweep_task = asyncio.create_task(
+                _sweep_loop(cfg.settings.approval_sweep_interval_minutes * 60)
+            )
+        logs.log_event("app_started", params={"otto_enabled": cfg.settings.otto_enabled})
+        yield
+        if sweep_task is not None:
+            sweep_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweep_task
+        for server in connected:
+            await server.cleanup()  # type: ignore[no-untyped-call]  # SDK lacks annotations
 
 
 app = fastapi.FastAPI(title="otto", lifespan=_lifespan)
