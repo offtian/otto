@@ -21,6 +21,21 @@ _APPROVED = "approved"
 
 
 @attrs.frozen
+class AuditEvent:
+    """
+    One rejected or system-driven HITL event (B5) — an attempt or expiry the
+    approval rows alone cannot show: who tried and was turned away, and what
+    the sweep timed out. ``occurred_at`` is stamped by the store on record.
+    """
+
+    event_type: str  # unauthorized_role | self_approval | unverified_identity | expired
+    actor_id: str
+    approval_id: str = ""
+    detail: str = ""
+    occurred_at: datetime | None = None
+
+
+@attrs.frozen
 class AuditEntry:
     """
     One approval as the audit trail sees it — the durable record minus the
@@ -58,12 +73,16 @@ class AuditReport:
     median_latency_seconds: float | None
     max_latency_seconds: float | None
     entries: tuple[AuditEntry, ...]
+    events: tuple[AuditEvent, ...] = ()
 
 
-def build_audit_report(entries: Sequence[AuditEntry]) -> AuditReport:
+def build_audit_report(
+    entries: Sequence[AuditEntry], *, events: Sequence[AuditEvent] = ()
+) -> AuditReport:
     """
     Aggregate audit entries into a report: status counts, authorized-write
-    count, and decision-latency (turnaround) statistics.
+    count, decision-latency (turnaround) statistics, and the rejected/system
+    events recorded alongside the decisions (B5).
     """
     by_status: dict[str, int] = {}
     for entry in entries:
@@ -76,6 +95,7 @@ def build_audit_report(entries: Sequence[AuditEntry]) -> AuditReport:
         median_latency_seconds=statistics.median(latencies) if latencies else None,
         max_latency_seconds=max(latencies) if latencies else None,
         entries=tuple(entries),
+        events=tuple(events),
     )
 
 
@@ -98,6 +118,14 @@ def render_report(report: AuditReport) -> str:
         lines.append(f"Max decision turnaround:     {report.max_latency_seconds / 60:.1f} min")
     else:
         lines.append("Decision turnaround:         n/a (no resolved approvals)")
+    if report.events:
+        by_type: dict[str, int] = {}
+        for event in report.events:
+            by_type[event.event_type] = by_type.get(event.event_type, 0) + 1
+        lines.append(
+            "Rejected/system events:     "
+            + ", ".join(f"{name}={count}" for name, count in sorted(by_type.items()))
+        )
     lines.append("")
     lines.append("Staged prototype figures prove the mechanism, not load.")
     return "\n".join(lines)

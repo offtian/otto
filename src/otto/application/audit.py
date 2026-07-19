@@ -14,4 +14,5 @@ async def generate_audit_report() -> audit.AuditReport:
     """
     cfg = config.get_config()
     entries = await cfg.approvals.list_audit_entries()
-    return audit.build_audit_report(entries)
+    events = await cfg.approvals.list_events()
+    return audit.build_audit_report(entries, events=events)

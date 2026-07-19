@@ -14,7 +14,7 @@ import attrs
 from otto import config
 from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
-from otto.domain.support import approvals, entities
+from otto.domain.support import approvals, audit, entities
 from otto.utils import logs
 
 
@@ -65,10 +65,15 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
         logs.log_event("approval_not_found", params={"approval_id": approval_id})
         return
 
-    if not await _may_resolve(resolver_id=resolver_id, pending=pending, cfg=cfg):
+    rejection = await _resolve_rejection(resolver_id=resolver_id, pending=pending, cfg=cfg)
+    if rejection is not None:
         logs.log_event(
-            "approval_click_unauthorized",
-            params={"approval_id": approval_id, "resolver_id": resolver_id},
+            "approval_click_rejected",
+            params={"approval_id": approval_id, "resolver_id": resolver_id, "reason": rejection},
+        )
+        # B5: rejected attempts are durable audit rows, not just log lines.
+        await cfg.approvals.record_event(
+            audit.AuditEvent(event_type=rejection, actor_id=resolver_id, approval_id=approval_id)
         )
         await cfg.slack.post_message(
             channel=pending.card_channel,
@@ -104,6 +109,12 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
             f"for {requester}, outcome delivered at the origin."
         ),
     )
+    # B2 disposition stamp: a restart resumes any terminal approval whose
+    # outcome never landed. ponytail: stamped after delivery, so a crash
+    # mid-delivery re-fires the approved tool on recovery — a duplicate,
+    # visible SailPoint request, never an unapproved one; a two-phase
+    # started/finished stamp is the upgrade if duplicates ever matter.
+    await cfg.approvals.mark_executed(approval_id)
     logs.log_event(
         "approval_resolved",
         params={
@@ -283,6 +294,12 @@ async def sweep_approvals(*, now: datetime) -> None:
             ),
             cfg=cfg,
         )
+        # B5: an expiry is an audit fact — nobody decided in time.
+        await cfg.approvals.record_event(
+            audit.AuditEvent(
+                event_type="expired", actor_id="system:sweep", approval_id=approval.id
+            )
+        )
 
     reminders = await cfg.approvals.claim_due_reminders(
         cutoff=now - timedelta(minutes=s.approval_reminder_minutes)
@@ -304,6 +321,38 @@ async def sweep_approvals(*, now: datetime) -> None:
         "approval_sweep",
         params={"expired": len(expired), "reminded": len(reminders), "purged": purged},
     )
+
+
+async def recover_approvals() -> None:
+    """
+    Finish terminal approvals whose decided run never completed (B2): a crash
+    between the resolve and the resumed run's outcome delivery leaves the
+    decision recorded but unexecuted. Auto-resume (decided 2026-07-19): the
+    human decision already happened, so recovery carries it out and reports at
+    the origin. A failed recovery is dispositioned with an origin apology so a
+    poisoned row can never crash-loop the startup path.
+    """
+    cfg = config.get_config()
+    for pending in await cfg.approvals.list_unexecuted():
+        approved = pending.status is approvals.ApprovalStatus.APPROVED
+        try:
+            result = await _resume_run(pending=pending, approved=approved, cfg=cfg)
+            await _post_reply(origin=pending.origin, text=str(result.final_output), cfg=cfg)
+            logs.log_event(
+                "approval_recovered",
+                params={"approval_id": pending.id, "status": pending.status.value},
+            )
+        except Exception as exc:
+            logs.log_exception(exc, params={"approval_id": pending.id, "job": "approval_recovery"})
+            await _post_reply(
+                origin=pending.origin,
+                text=(
+                    "Sorry — I couldn't finish handling your request after a "
+                    "restart. The support team has been alerted; please ask again."
+                ),
+                cfg=cfg,
+            )
+        await cfg.approvals.mark_executed(pending.id)
 
 
 def _build_context(
@@ -401,19 +450,35 @@ async def _pause_for_approval(
     result: agents.RunResult,
     cfg: config.Configuration,
 ) -> None:
-    # ponytail: one card covers the whole run — resolving it applies the same
-    # decision to every interruption; per-tool cards if mixed runs show up.
-    interruption = result.interruptions[0]
-    tool_name = interruption.tool_name or "unknown"
+    # One card still covers the whole run (one decision), but it names every
+    # interrupted call (B3) — the approver never authorizes an unseen tool.
+    # Per-tool cards remain the upgrade if mixed runs show up for real.
+    interruptions = result.interruptions
+    tool_name = " + ".join(dict.fromkeys((i.tool_name or "unknown") for i in interruptions))
+    if len(interruptions) == 1:
+        tool_arguments = _tool_arguments(interruptions[0])
+    else:
+        tool_arguments = json.dumps(
+            [
+                {"tool": i.tool_name or "unknown", "arguments": _tool_arguments(i)}
+                for i in interruptions
+            ]
+        )
 
     # A re-triggered event on the same conversation (e.g. the requester nudges
     # the ticket during the approval gap) reruns the agent and can reach the
     # same gated tool again. Suppress the duplicate card — the earlier run is
-    # already waiting, and resolving it delivers the outcome here.
-    # ponytail: dedupe on origin+tool catches the human-paced re-trigger; a
-    # sub-second double-fire could still race past it at single-replica. Add a
-    # partial unique index (status='pending') if multi-replica makes that real.
-    if await cfg.approvals.find_pending(origin=request.origin, tool_name=tool_name) is not None:
+    # already waiting, and resolving it delivers the outcome here. A different
+    # request on the same tool is NOT a duplicate (B4): arguments compare too.
+    # ponytail: dedupe catches the human-paced re-trigger; a sub-second
+    # double-fire could still race past it at single-replica. Add a partial
+    # unique index (status='pending') if multi-replica makes that real.
+    if (
+        await cfg.approvals.find_pending(
+            origin=request.origin, tool_name=tool_name, tool_arguments=tool_arguments
+        )
+        is not None
+    ):
         logs.log_event(
             "approval_duplicate_suppressed",
             params={"request_id": request.id, "tool_name": tool_name},
@@ -435,7 +500,7 @@ async def _pause_for_approval(
         origin=request.origin,
         request_text=request.text,
         tool_name=tool_name,
-        tool_arguments=_tool_arguments(interruption),
+        tool_arguments=tool_arguments,
         run_state_json=result.to_state().to_string(),
     )
     requester = await _requester_label(
@@ -494,18 +559,32 @@ async def _resume_run(
     return await agents.Runner.run(cfg.agent, state)
 
 
-async def _may_resolve(
+async def _resolve_rejection(
     *,
     resolver_id: str,
     pending: approvals.PendingApproval,
     cfg: config.Configuration,
-) -> bool:
-    # Self-approval prohibited (T3 recommended default — flip here if the
-    # open decision lands the other way). The directory makes the check
-    # cross-channel: a ticket requester can't approve via their Slack id.
+) -> str | None:
+    """
+    Return why this click may not resolve the approval (an audit event type),
+    or None when it may. Self-approval prohibited (T3). Cross-channel resolves
+    fail closed (B1): a ticket's requester id is a Jira account id while the
+    click is a Slack id, so id equality proves nothing — the clicker must be a
+    mapped identity whose Jira id is known and provably not the requester's.
+    An unmapped clicker *could be* the requester; deny rather than guess.
+    """
     if not await _is_authorized_approver(resolver_id=resolver_id, cfg=cfg):
-        return False
-    return not await cfg.directory.same_person(resolver_id, pending.requester_id)
+        return "unauthorized_role"
+    if isinstance(pending.origin, entities.TicketRef):
+        resolver = await cfg.directory.find(resolver_id)
+        if resolver is None or not resolver.jira_account_id:
+            return "unverified_identity"
+        if resolver.jira_account_id == pending.requester_id:
+            return "self_approval"
+        return None
+    if await cfg.directory.same_person(resolver_id, pending.requester_id):
+        return "self_approval"
+    return None
 
 
 async def _is_authorized_approver(*, resolver_id: str, cfg: config.Configuration) -> bool:
@@ -534,10 +613,29 @@ def _tool_arguments(interruption: agents.ToolApprovalItem) -> str:
 
 def _approval_summary(*, tool_arguments: str) -> str:
     """
-    Render a paused tool's arguments as readable mrkdwn for the approver — the
+    Render the paused arguments as readable mrkdwn for the approver — the
     target and business justification of an access request, not raw JSON — so
-    they can judge whether to let Otto file it on the requester's behalf. Falls
-    back to the raw arguments for tools whose args aren't the access shape.
+    they can judge whether to let Otto file it on the requester's behalf.
+    When several calls paused in one run (B3), every one gets its own block.
+    """
+    try:
+        args = json.loads(tool_arguments)
+    except (json.JSONDecodeError, TypeError):
+        args = None
+    if isinstance(args, list):
+        return "\n\n".join(
+            f"*Tool:* `{entry.get('tool', 'tool')}`\n"
+            + _arguments_block(str(entry.get("arguments", "")))
+            for entry in args
+            if isinstance(entry, dict)
+        )
+    return _arguments_block(tool_arguments)
+
+
+def _arguments_block(tool_arguments: str) -> str:
+    """
+    Render one tool's argument string: labeled access-request fields when the
+    args are the access shape, the raw arguments fenced otherwise.
     """
     try:
         args = json.loads(tool_arguments)

@@ -7,6 +7,7 @@ decision — including the serialized Agents SDK run state.
 """
 
 import enum
+import json
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -17,6 +18,18 @@ from sqlalchemy.dialects import postgresql as pg
 
 from otto.data import models
 from otto.domain.support import audit, entities
+
+
+def canonical_arguments(raw: str) -> str:
+    """
+    Return a key-order/whitespace-insensitive form of a tool-arguments string
+    for duplicate comparison (B4) — trivially different serializations of the
+    same call compare equal; genuinely different arguments do not.
+    """
+    try:
+        return json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":"))
+    except (json.JSONDecodeError, TypeError):
+        return raw.strip()
 
 
 class ApprovalStatus(enum.StrEnum):
@@ -64,6 +77,9 @@ class PendingApproval:
     # the returned entity is complete.
     resolver_id: str = ""
     resolved_at: datetime | None = None
+    # Stamped once the decided run's outcome was delivered (B2). None on a
+    # terminal approved/denied row = decided but never executed.
+    executed_at: datetime | None = None
 
 
 class ApprovalStore(Protocol):
@@ -98,13 +114,43 @@ class ApprovalStore(Protocol):
         ...
 
     async def find_pending(
-        self, *, origin: entities.Origin, tool_name: str
+        self, *, origin: entities.Origin, tool_name: str, tool_arguments: str
     ) -> PendingApproval | None:
         """
-        Return a still-pending approval for this origin and tool, or None.
-        Used to suppress a duplicate card when a re-triggered event on the
-        same conversation asks for the same gated action again while its
-        earlier run is already awaiting a human OK.
+        Return a still-pending approval for this origin, tool, and arguments
+        (compared canonically, B4), or None. Used to suppress a duplicate card
+        when a re-triggered event on the same conversation asks for the same
+        gated action again while its earlier run is already awaiting a human
+        OK — a *different* request on the same tool is not a duplicate.
+        """
+        ...
+
+    async def mark_executed(self, approval_id: str) -> None:
+        """
+        Stamp the approval as executed — its decided run completed and the
+        outcome was delivered (B2).
+        """
+        ...
+
+    async def list_unexecuted(self) -> list[PendingApproval]:
+        """
+        Return approved/denied approvals whose run state is still present but
+        whose execution was never stamped (B2) — decided in a process that
+        died before the resumed run completed. Expired approvals owe no
+        execution and are excluded.
+        """
+        ...
+
+    async def record_event(self, event: audit.AuditEvent) -> None:
+        """
+        Append a rejected/system HITL event to the durable audit trail (B5),
+        stamping ``occurred_at`` if unset.
+        """
+        ...
+
+    async def list_events(self) -> list[audit.AuditEvent]:
+        """
+        Return every recorded audit event, oldest first (B5).
         """
         ...
 
@@ -155,6 +201,7 @@ class InMemoryApprovalStore:
         # are DB-managed columns in the durable store).
         self._created_at: dict[str, datetime] = {}
         self._reminded_at: dict[str, datetime] = {}
+        self._events: list[audit.AuditEvent] = []
 
     async def save(self, approval: PendingApproval) -> None:
         self._approvals[approval.id] = approval
@@ -188,16 +235,39 @@ class InMemoryApprovalStore:
         return resolved
 
     async def find_pending(
-        self, *, origin: entities.Origin, tool_name: str
+        self, *, origin: entities.Origin, tool_name: str, tool_arguments: str
     ) -> PendingApproval | None:
+        wanted = canonical_arguments(tool_arguments)
         for approval in self._approvals.values():
             if (
                 approval.status is ApprovalStatus.PENDING
                 and approval.origin == origin
                 and approval.tool_name == tool_name
+                and canonical_arguments(approval.tool_arguments) == wanted
             ):
                 return approval
         return None
+
+    async def mark_executed(self, approval_id: str) -> None:
+        approval = await self.get(approval_id)
+        self._approvals[approval_id] = attrs.evolve(approval, executed_at=datetime.now(tz=UTC))
+
+    async def list_unexecuted(self) -> list[PendingApproval]:
+        return [
+            approval
+            for approval in self._approvals.values()
+            if approval.status in (ApprovalStatus.APPROVED, ApprovalStatus.DENIED)
+            and approval.executed_at is None
+            and approval.run_state_json
+        ]
+
+    async def record_event(self, event: audit.AuditEvent) -> None:
+        if event.occurred_at is None:
+            event = attrs.evolve(event, occurred_at=datetime.now(tz=UTC))
+        self._events.append(event)
+
+    async def list_events(self) -> list[audit.AuditEvent]:
+        return list(self._events)
 
     async def expire_pending(self, *, cutoff: datetime) -> list[PendingApproval]:
         now = datetime.now(tz=UTC)
@@ -256,6 +326,7 @@ class InMemoryApprovalStore:
 
 # SQLModel exposes the SQLAlchemy Table at runtime; mypy needs the hint.
 _TABLE: sa.Table = models.ApprovalRecord.__table__  # type: ignore[attr-defined]
+_EVENTS: sa.Table = models.AuditEventRecord.__table__  # type: ignore[attr-defined]
 
 
 @attrs.frozen
@@ -317,12 +388,13 @@ class PostgresApprovalStore:
         raise ApprovalAlreadyResolved(f"approval {approval_id!r} is already resolved")
 
     async def find_pending(
-        self, *, origin: entities.Origin, tool_name: str
+        self, *, origin: entities.Origin, tool_name: str, tool_arguments: str
     ) -> PendingApproval | None:
         table = _TABLE
         # origin_to_json emits fixed key order, so equality on the stored TEXT
-        # is exact for both origin kinds.
-        row = await self.database.fetch_one(
+        # is exact for both origin kinds. Arguments compare canonically in
+        # Python (B4) — pending rows per origin+tool are at most a handful.
+        rows = await self.database.fetch_all(
             sa.select(table).where(
                 sa.and_(
                     table.c.status == ApprovalStatus.PENDING.value,
@@ -331,7 +403,57 @@ class PostgresApprovalStore:
                 )
             )
         )
-        return None if row is None else _from_row(row)
+        wanted = canonical_arguments(tool_arguments)
+        for row in rows:
+            approval = _from_row(row)
+            if canonical_arguments(approval.tool_arguments) == wanted:
+                return approval
+        return None
+
+    async def mark_executed(self, approval_id: str) -> None:
+        table = _TABLE
+        await self.database.execute(
+            sa.update(table).where(table.c.id == approval_id).values(executed_at=sa.func.now())
+        )
+
+    async def list_unexecuted(self) -> list[PendingApproval]:
+        table = _TABLE
+        rows = await self.database.fetch_all(
+            sa.select(table).where(
+                sa.and_(
+                    table.c.status.in_(
+                        [ApprovalStatus.APPROVED.value, ApprovalStatus.DENIED.value]
+                    ),
+                    table.c.executed_at.is_(None),
+                    table.c.run_state_json.is_not(None),
+                )
+            )
+        )
+        return [_from_row(row) for row in rows]
+
+    async def record_event(self, event: audit.AuditEvent) -> None:
+        await self.database.execute(
+            sa.insert(_EVENTS).values(
+                event_type=event.event_type,
+                actor_id=event.actor_id,
+                approval_id=event.approval_id,
+                detail=event.detail,
+                occurred_at=event.occurred_at if event.occurred_at is not None else sa.func.now(),
+            )
+        )
+
+    async def list_events(self) -> list[audit.AuditEvent]:
+        rows = await self.database.fetch_all(sa.select(_EVENTS).order_by(_EVENTS.c.occurred_at))
+        return [
+            audit.AuditEvent(
+                event_type=row["event_type"],
+                actor_id=row["actor_id"],
+                approval_id=row["approval_id"],
+                detail=row["detail"],
+                occurred_at=row["occurred_at"],
+            )
+            for row in rows
+        ]
 
     async def expire_pending(self, *, cutoff: datetime) -> list[PendingApproval]:
         table = _TABLE
@@ -425,6 +547,7 @@ def _to_row(approval: PendingApproval) -> dict[str, object]:
         "card_ts": approval.card_ts,
         "resolver_id": approval.resolver_id,
         "resolved_at": approval.resolved_at,
+        "executed_at": approval.executed_at,
     }
 
 
@@ -445,4 +568,5 @@ def _from_row(row: Any) -> PendingApproval:
         card_ts=data["card_ts"],
         resolver_id=data["resolver_id"],
         resolved_at=data["resolved_at"],
+        executed_at=data["executed_at"],
     )

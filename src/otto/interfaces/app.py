@@ -128,6 +128,12 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
         # After connect on purpose: wiring the agent pulls each mount's tool list
         # over its live connection (a failed mount degrades to its stub tool).
         await cfg.load_agents()
+        # B2: execute any approval decided before a crash/restart whose run
+        # never completed — a human decision is carried out, never lost.
+        try:
+            await support.recover_approvals()
+        except Exception as exc:
+            logs.log_exception(exc, params={"job": "approval_recovery"})
         # Approval maintenance sweep (2.5): only meaningful against the durable
         # store, and the interval is a kill switch (0 = off).
         sweep_task: asyncio.Task[None] | None = None

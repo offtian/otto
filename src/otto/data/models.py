@@ -40,12 +40,39 @@ class ApprovalRecord(SQLModel, table=True):
     resolved_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
+    # Stamped once the decided run's outcome was delivered (B2). Null on a
+    # terminal approved/denied row = decided but never executed — the startup
+    # recovery sweep resumes it instead of losing the human's decision.
+    executed_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
     # Last time the triage channel was nudged about this still-pending approval
     # (2.5). Null = never reminded; the reminder sweep falls back to created_at.
     reminded_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
     created_at: datetime = Field(
+        default_factory=lambda: datetime.now(tz=UTC),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class AuditEventRecord(SQLModel, table=True):
+    """
+    One rejected or system-driven HITL event (B5): unauthorized clicks,
+    self-approval blocks, unverifiable identities, expiries. Append-only —
+    the audit report reads it alongside the approvals projection so attempts
+    are as durable as decisions.
+    """
+
+    __tablename__ = "audit_events"
+
+    id: int | None = Field(default=None, primary_key=True)
+    event_type: str = Field(index=True)
+    actor_id: str
+    approval_id: str = ""
+    detail: str = ""
+    occurred_at: datetime = Field(
         default_factory=lambda: datetime.now(tz=UTC),
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )

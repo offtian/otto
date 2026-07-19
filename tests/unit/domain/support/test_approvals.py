@@ -1,8 +1,9 @@
 from datetime import UTC, datetime
 
+import attrs
 import pytest
 
-from otto.domain.support import approvals, entities
+from otto.domain.support import approvals, audit, entities
 
 
 SLACK_ORIGIN = entities.SlackThread(channel_id="C1", thread_ts="1.0")
@@ -82,13 +83,18 @@ class TestInMemoryApprovalStore:
 
 
 class TestInMemoryApprovalStoreFindPending:
-    async def test_returns_a_pending_approval_matching_origin_and_tool(self):
+    async def test_returns_a_pending_approval_matching_origin_tool_and_arguments(self):
         # Given a stored pending approval on a Slack origin
         store = approvals.InMemoryApprovalStore()
         await store.save(_pending(SLACK_ORIGIN))
 
-        # When a matching origin and tool are looked up
-        found = await store.find_pending(origin=SLACK_ORIGIN, tool_name="request_access")
+        # When a matching origin, tool, and a differently-formatted but
+        # equivalent argument string are looked up (B4: canonical comparison)
+        found = await store.find_pending(
+            origin=SLACK_ORIGIN,
+            tool_name="request_access",
+            tool_arguments='{ "system" : "snowflake" }',
+        )
 
         # Then that pending approval is returned
         assert found is not None
@@ -100,9 +106,29 @@ class TestInMemoryApprovalStoreFindPending:
         await store.save(_pending(SLACK_ORIGIN))
 
         # When a different tool on the same origin is looked up
-        found = await store.find_pending(origin=SLACK_ORIGIN, tool_name="submit_access_request")
+        found = await store.find_pending(
+            origin=SLACK_ORIGIN,
+            tool_name="submit_access_request",
+            tool_arguments='{"system": "snowflake"}',
+        )
 
         # Then nothing matches — the tool differs
+        assert found is None
+
+    async def test_returns_none_for_different_arguments(self):
+        # Given a pending approval for one argument set
+        store = approvals.InMemoryApprovalStore()
+        await store.save(_pending(SLACK_ORIGIN))
+
+        # When the same tool on the same origin is looked up with different
+        # arguments — a genuinely different second request (B4)
+        found = await store.find_pending(
+            origin=SLACK_ORIGIN,
+            tool_name="request_access",
+            tool_arguments='{"system": "workday"}',
+        )
+
+        # Then nothing matches — it must get its own approval card
         assert found is None
 
     async def test_returns_none_for_a_different_origin(self):
@@ -112,7 +138,9 @@ class TestInMemoryApprovalStoreFindPending:
 
         # When the same tool on a different origin is looked up
         found = await store.find_pending(
-            origin=entities.TicketRef(issue_key="IT-42"), tool_name="request_access"
+            origin=entities.TicketRef(issue_key="IT-42"),
+            tool_name="request_access",
+            tool_arguments='{"system": "snowflake"}',
         )
 
         # Then nothing matches — the origin differs
@@ -124,11 +152,76 @@ class TestInMemoryApprovalStoreFindPending:
         await store.save(_pending(SLACK_ORIGIN))
         await store.resolve("ap-1", approvals.ApprovalStatus.APPROVED, resolver_id="U_SUPPORT")
 
-        # When its origin and tool are looked up
-        found = await store.find_pending(origin=SLACK_ORIGIN, tool_name="request_access")
+        # When its origin, tool, and arguments are looked up
+        found = await store.find_pending(
+            origin=SLACK_ORIGIN,
+            tool_name="request_access",
+            tool_arguments='{"system": "snowflake"}',
+        )
 
         # Then it is not returned — only a still-pending run suppresses a duplicate
         assert found is None
+
+
+class TestInMemoryApprovalStoreExecution:
+    async def test_a_resolved_approval_is_unexecuted_until_marked(self):
+        # Given an approval resolved but never marked executed (B2 crash window)
+        store = approvals.InMemoryApprovalStore()
+        await store.save(_pending(SLACK_ORIGIN))
+        await store.resolve("ap-1", approvals.ApprovalStatus.APPROVED, resolver_id="U_SUPPORT")
+
+        # When the unexecuted approvals are listed
+        unexecuted = await store.list_unexecuted()
+
+        # Then it is returned — decided but never carried out
+        assert [a.id for a in unexecuted] == ["ap-1"]
+
+    async def test_mark_executed_dispositions_the_approval(self):
+        # Given a resolved approval
+        store = approvals.InMemoryApprovalStore()
+        await store.save(_pending(SLACK_ORIGIN))
+        await store.resolve("ap-1", approvals.ApprovalStatus.DENIED, resolver_id="U_ADMIN")
+
+        # When it is marked executed
+        await store.mark_executed("ap-1")
+
+        # Then it no longer needs recovery and carries the execution stamp
+        assert await store.list_unexecuted() == []
+        assert (await store.get("ap-1")).executed_at is not None
+
+    async def test_pending_and_expired_approvals_never_need_recovery(self):
+        # Given one just-saved pending approval and one the sweep expired
+        store = approvals.InMemoryApprovalStore()
+        await store.save(
+            attrs.evolve(_pending(entities.TicketRef(issue_key="IT-42")), id="ap-expired")
+        )
+        await store.expire_pending(cutoff=FAR_FUTURE)
+        await store.save(_pending(SLACK_ORIGIN))
+
+        # When the unexecuted approvals are listed
+        unexecuted = await store.list_unexecuted()
+
+        # Then neither is returned — pending owes no execution yet, expired never will
+        assert unexecuted == []
+
+
+class TestInMemoryApprovalStoreEvents:
+    async def test_record_event_stamps_and_lists_in_order(self):
+        # Given a store and two rejected-attempt events (B5)
+        store = approvals.InMemoryApprovalStore()
+        await store.record_event(
+            audit.AuditEvent(event_type="unauthorized_role", actor_id="U_RANDO")
+        )
+        await store.record_event(
+            audit.AuditEvent(event_type="self_approval", actor_id="U_SUPPORT", approval_id="ap-1")
+        )
+
+        # When the events are listed
+        events = await store.list_events()
+
+        # Then both are returned in order with occurred_at stamped
+        assert [e.event_type for e in events] == ["unauthorized_role", "self_approval"]
+        assert all(e.occurred_at is not None for e in events)
 
 
 class TestInMemoryApprovalStoreSweep:
