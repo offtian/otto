@@ -30,7 +30,7 @@ dependencies = [
     "asyncpg",
     # Hard-pinned (NFR6): serialized RunState in pending approvals couples us
     # to the SDK version — drain approvals before bumping this.
-    "openai-agents==0.18.2",
+    "openai-agents==0.20.0",
     "fastapi>=0.139.0",
     "uvicorn[standard]>=0.51.0",
     "slack-sdk>=3.43.0",
