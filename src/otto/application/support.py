@@ -12,6 +12,7 @@ import agents
 import attrs
 
 from otto import config
+from otto.application import flows, graph
 from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals, audit, entities
@@ -28,22 +29,25 @@ async def handle_support_request(*, request: entities.SupportRequest) -> None:
     """
     cfg = config.get_config()
     await _begin_thinking(origin=request.origin, cfg=cfg)
-    result = await agents.Runner.run(
-        cfg.agent,
-        await _conversation_input(request=request, cfg=cfg),
-        context=_build_context(
+    state: graph.State = {
+        "text": request.text,
+        "input": await _conversation_input(request=request, cfg=cfg),
+        "ctx": _build_context(
             requester_id=request.user_id,
             origin=request.origin,
             cfg=cfg,
         ),
-    )
-    if result.interruptions:
-        await _pause_for_approval(request=request, result=result, cfg=cfg)
+    }
+    outcome = await flows.SUPPORT.run(state)
+    if isinstance(outcome, graph.Suspend):
+        await _pause_for_approval(
+            request=request, result=outcome.payload, node=outcome.node, cfg=cfg
+        )
     else:
-        await _post_answer(origin=request.origin, text=str(result.final_output), cfg=cfg)
+        await _post_answer(origin=request.origin, text=str(outcome.output.final_output), cfg=cfg)
     logs.log_event(
         "support_request_handled",
-        params={"request_id": request.id, "paused": bool(result.interruptions)},
+        params={"request_id": request.id, "paused": isinstance(outcome, graph.Suspend)},
     )
 
 
@@ -95,8 +99,16 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
         )
         return
 
-    result = await _resume_run(pending=pending, approved=approved, cfg=cfg)
-    await _post_reply(origin=pending.origin, text=str(result.final_output), cfg=cfg)
+    outcome = await _resume_run(pending=pending, approved=approved, cfg=cfg)
+    if isinstance(outcome, graph.Suspend):
+        # The resumed run hit another gated tool (e.g. a follow-up access
+        # request in the same conversation) — it needs its own card and its
+        # own human decision; this approval's decision was still carried out.
+        await _pause_for_approval(
+            request=_request_from(pending), result=outcome.payload, node=outcome.node, cfg=cfg
+        )
+    else:
+        await _post_reply(origin=pending.origin, text=str(outcome.output.final_output), cfg=cfg)
     verdict = "Approved" if approved else "Denied"
     requester = await _requester_label(
         user_id=pending.requester_id, origin=pending.origin, cfg=cfg
@@ -336,8 +348,18 @@ async def recover_approvals() -> None:
     for pending in await cfg.approvals.list_unexecuted():
         approved = pending.status is approvals.ApprovalStatus.APPROVED
         try:
-            result = await _resume_run(pending=pending, approved=approved, cfg=cfg)
-            await _post_reply(origin=pending.origin, text=str(result.final_output), cfg=cfg)
+            outcome = await _resume_run(pending=pending, approved=approved, cfg=cfg)
+            if isinstance(outcome, graph.Suspend):
+                await _pause_for_approval(
+                    request=_request_from(pending),
+                    result=outcome.payload,
+                    node=outcome.node,
+                    cfg=cfg,
+                )
+            else:
+                await _post_reply(
+                    origin=pending.origin, text=str(outcome.output.final_output), cfg=cfg
+                )
             logs.log_event(
                 "approval_recovered",
                 params={"approval_id": pending.id, "status": pending.status.value},
@@ -468,6 +490,7 @@ async def _pause_for_approval(
     *,
     request: entities.SupportRequest,
     result: agents.RunResult,
+    node: str,
     cfg: config.Configuration,
 ) -> None:
     # One card still covers the whole run (one decision), but it names every
@@ -512,6 +535,7 @@ async def _pause_for_approval(
         tool_name=tool_name,
         tool_arguments=tool_arguments,
         run_state_json=result.to_state().to_string(),
+        node=node,
     )
     requester = await _requester_label(
         user_id=approval.requester_id, origin=request.origin, cfg=cfg
@@ -545,28 +569,34 @@ async def _resume_run(
     pending: approvals.PendingApproval,
     approved: bool,
     cfg: config.Configuration,
-) -> agents.RunResult:
-    # The context must be re-supplied via from_string, NOT via Runner.run:
-    # a context passed to run() replaces the state's context wrapper, which
-    # is where approve()/reject() decisions are recorded — the run would
-    # re-interrupt forever.
-    state = await agents.RunState.from_string(
-        cfg.agent,
-        pending.run_state_json,
-        context_override=agents.RunContextWrapper(
-            context=_build_context(
-                requester_id=pending.requester_id,
-                origin=pending.origin,
-                cfg=cfg,
-            ),
+) -> graph.Suspend | graph.Done:
+    """
+    Re-enter the support graph at the node that suspended for this approval,
+    with the human decision applied to the paused run state.
+    """
+    state: graph.State = {
+        "text": pending.request_text,
+        "resume": {"run_state_json": pending.run_state_json, "approved": approved},
+        "ctx": _build_context(
+            requester_id=pending.requester_id,
+            origin=pending.origin,
+            cfg=cfg,
         ),
+    }
+    return await flows.SUPPORT.run(state, entry=pending.node)
+
+
+def _request_from(pending: approvals.PendingApproval) -> entities.SupportRequest:
+    """
+    Return the original request a pending approval was raised for — the
+    re-pause path needs it when a resumed run suspends again.
+    """
+    return entities.SupportRequest(
+        id=pending.request_id,
+        user_id=pending.requester_id,
+        text=pending.request_text,
+        origin=pending.origin,
     )
-    for interruption in state.get_interruptions():
-        if approved:
-            state.approve(interruption)
-        else:
-            state.reject(interruption)
-    return await agents.Runner.run(cfg.agent, state)
 
 
 async def _resolve_rejection(

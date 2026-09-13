@@ -33,6 +33,13 @@ class ApprovalRecord(SQLModel, table=True):
     # run state after resolution (A9). Retention default: 30 days post-resolution
     # — confirm before the first audited requests land (2.1 is [NEEDS APPROVAL]).
     run_state_json: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    # Flow-graph node that suspended for this approval — the resume path
+    # re-enters the support graph here. The default covers rows created
+    # before intent routing existed (all general-agent runs).
+    node: str = Field(
+        default="general",
+        sa_column=Column(String, nullable=False, server_default="general"),
+    )
     # Which surface owns the row ("slack" | "streamlit") — the sweep and the
     # startup recovery act only on their own surface's approvals.
     channel: str = Field(

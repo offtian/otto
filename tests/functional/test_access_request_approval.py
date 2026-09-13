@@ -25,6 +25,7 @@ from otto.domain.identity import users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals, entities
 from otto.settings import Settings
+from otto.vendors import llm
 from otto.vendors import slack as slack_vendor
 
 
@@ -71,6 +72,7 @@ class ScriptedModel(Model):
     def __init__(self, turns):
         self.turns = list(turns)
         self.inputs = []
+        self.system_instructions = []
 
     async def get_response(
         self,
@@ -87,6 +89,7 @@ class ScriptedModel(Model):
         prompt=None,
     ):
         self.inputs.append(input)
+        self.system_instructions.append(system_instructions)
         return ModelResponse(output=self.turns.pop(0), usage=Usage(), response_id=None)
 
     def stream_response(self, *args, **kwargs):
@@ -168,7 +171,14 @@ def wire(monkeypatch):
     optionally fake Jira) and return (config, gateway, model).
     """
 
-    def _wire(model, jira=None, directory=(), **settings_overrides):
+    def _wire(
+        model,
+        jira=None,
+        directory=(),
+        intent_classifier=None,
+        access_agent=None,
+        **settings_overrides,
+    ):
         gateway = FakeSlackGateway()
         cfg = config.Configuration(
             settings=Settings(
@@ -187,6 +197,8 @@ def wire(monkeypatch):
             confluence_mcp=None,
             sailpoint_mcp=None,
             agent=support_agent.build_agent(model=model),
+            access_agent=access_agent,
+            intent_classifier=intent_classifier,
         )
         monkeypatch.setattr(config, "get_config", lambda: cfg)
         return cfg, gateway, model
@@ -870,6 +882,78 @@ class TestAuditTrailOfAttempts:
         # Then the expiry is an audit event attributed to the sweep
         events = await cfg.approvals.list_events()
         assert [(e.event_type, e.actor_id) for e in events] == [("expired", "system:sweep")]
+
+
+class FakeIntentClassifier:
+    """
+    Deterministic intent classifier: always returns the given reading.
+    """
+
+    def __init__(self, reading):
+        self.reading = reading
+        self.texts = []
+
+    async def classify(self, *, text):
+        self.texts.append(text)
+        return self.reading
+
+
+class TestIntentRouting:
+    async def test_an_access_intent_runs_the_access_specialist(self, wire):
+        # Given a classifier that reads the request as an access request and
+        # a wired access specialist
+        model = ScriptedModel([[_access_tool_call()]])
+        cfg, gateway, _ = wire(
+            model,
+            intent_classifier=FakeIntentClassifier(llm.IntentReading(intent=llm.INTENT_ACCESS)),
+            access_agent=support_agent.build_access_agent(model=model),
+        )
+
+        # When the request is handled
+        await _submit_request()
+
+        # Then the access specialist's instructions drove the run, and the
+        # stored approval remembers the access node for resume
+        assert model.system_instructions[0] == support_agent.ACCESS_INSTRUCTIONS
+        pending = await cfg.approvals.get(gateway.cards[0]["approval_id"])
+        assert pending.node == "access"
+
+    async def test_an_approved_access_run_resumes_on_the_access_specialist(self, wire):
+        # Given an access-specialist run paused on the gated tool
+        model = ScriptedModel([[_access_tool_call()], [_text("Submitted for provisioning.")]])
+        _cfg, gateway, model = wire(
+            model,
+            intent_classifier=FakeIntentClassifier(llm.IntentReading(intent=llm.INTENT_ACCESS)),
+            access_agent=support_agent.build_access_agent(model=model),
+        )
+        await _submit_request()
+
+        # When an authorized approver approves it
+        await support.resolve_approval(
+            approval_id=gateway.cards[0]["approval_id"], resolver_id="U_SUPPORT", approved=True
+        )
+
+        # Then the resumed run stayed on the specialist and the outcome
+        # reached the origin — the graph re-entered at the access node
+        assert model.system_instructions[-1] == support_agent.ACCESS_INSTRUCTIONS
+        assert ("D1", "1.0", "Submitted for provisioning.") in gateway.messages
+
+    async def test_a_non_access_intent_runs_the_general_agent(self, wire):
+        # Given a classifier that reads the request as troubleshooting
+        model = ScriptedModel([[_text("Try restarting the VPN client.")]])
+        _cfg, _gateway, model = wire(
+            model,
+            intent_classifier=FakeIntentClassifier(
+                llm.IntentReading(intent="troubleshooting", services=("vpn",))
+            ),
+            access_agent=support_agent.build_access_agent(model=model),
+        )
+
+        # When the request is handled
+        await _submit_request()
+
+        # Then the general agent (full toolset) handled it
+        assert model.system_instructions[0] == support_agent.INSTRUCTIONS
 
 
 class TestInjectionCannotBypassGate:

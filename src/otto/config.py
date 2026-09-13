@@ -79,17 +79,30 @@ class Configuration(pydantic.BaseModel):
     # Wired by load_agents() at app startup, after the MCP servers connect —
     # function_tools() needs a live connection, so get_config() cannot do it.
     agent: pydantic.SkipValidation[_Agent] = None  # type: ignore[assignment]
+    # The access-request flow node's agent; None routes access intents to the
+    # general agent (which keeps the same gated tools).
+    access_agent: pydantic.SkipValidation[_Agent | None] = None
+    # Routes each inbound request to a flow-graph node; None = no routing,
+    # every request runs the general agent, exactly the pre-graph behavior.
+    intent_classifier: pydantic.SkipValidation[llm.LLMIntentClassifier | None] = None
 
     async def load_agents(self) -> None:
         """
-        Wire the Otto agent from the model and the mounted MCP capabilities.
+        Wire the flow agents from the model and the mounted MCP capabilities.
         A mount whose server is absent or never connected degrades to the
         capability's local stub tool instead of erroring on every request.
         """
+        confluence_tools = await _mounted_tools(self.confluence_mcp)
+        sailpoint_tools = await _mounted_tools(self.sailpoint_mcp)
         self.agent = support_agent.build_agent(
             model=self.model,
-            confluence_tools=await _mounted_tools(self.confluence_mcp),
-            sailpoint_tools=await _mounted_tools(self.sailpoint_mcp),
+            confluence_tools=confluence_tools,
+            sailpoint_tools=sailpoint_tools,
+        )
+        self.access_agent = support_agent.build_access_agent(
+            model=self.model,
+            confluence_tools=confluence_tools,
+            sailpoint_tools=sailpoint_tools,
         )
 
     def load_model(self) -> None:
@@ -126,6 +139,14 @@ class Configuration(pydantic.BaseModel):
                 else None
             ),
             team_channels=self.settings.team_channel_map,
+        )
+        # Intent routing for the flow graph: one zero-shot classification per
+        # request; fail-open, so a classifier outage degrades to the general
+        # agent, never to a blocked request.
+        self.intent_classifier = llm.build_intent_classifier(
+            base_url=self.settings.llm_base_url,
+            api_key=self.settings.llm_api_key,
+            model_name=self.settings.llm_model,
         )
         self.jira = (
             jira_vendor.JiraGateway(
