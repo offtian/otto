@@ -224,6 +224,10 @@ async def record_feedback(*, helpful: bool, origin: entities.Origin, voter_id: s
             params={"signal": "helpful_vote", "origin": _origin_ref(origin), "voter_id": voter_id},
         )
         await _post_reply(origin=origin, text="Glad that helped! :tada:", cfg=cfg)
+        # After the reply on purpose: this whole use-case already runs as a
+        # background task, so a slow cognify never delays the confirmation —
+        # and a memory outage must never fail a recorded resolution.
+        await _remember_resolution(origin=origin, cfg=cfg)
         return
     await cfg.triage.escalate(
         subject="Unresolved support answer",
@@ -397,6 +401,7 @@ def _build_context(
         origin_ref=_origin_ref(origin),
         runbooks_dir=pathlib.Path(cfg.settings.runbooks_dir),
         ticket_backend=cfg.triage,
+        memory=cfg.memory,
     )
 
 
@@ -598,6 +603,30 @@ async def _resume_run(
         }
     )
     return await flows.SUPPORT.run(state, entry=pending.node)
+
+
+async def _remember_resolution(*, origin: entities.Origin, cfg: config.Configuration) -> None:
+    """
+    Ingest a just-resolved conversation into long-term memory (Phase 3) —
+    the next similar issue gets "we fixed this before" context. Votes ride
+    only Slack answers, so only Slack threads land here; best-effort by
+    design, any failure is logged and swallowed.
+    """
+    if cfg.memory is None or not isinstance(origin, entities.SlackThread):
+        return
+    try:
+        history = await cfg.slack.fetch_thread(
+            channel=origin.channel_id,
+            thread_ts=origin.thread_ts,
+            limit=cfg.settings.thread_history_limit,
+        )
+        transcript = "\n".join(f"{author}: {text}" for author, text in history)
+        await cfg.memory.ingest(
+            text=f"Resolved support conversation (requester confirmed):\n{transcript}"
+        )
+        logs.log_event("resolution_remembered", params={"origin": _origin_ref(origin)})
+    except Exception as exc:
+        logs.log_exception(exc, params={"job": "memory_ingest", "origin": _origin_ref(origin)})
 
 
 def _request_from(pending: approvals.PendingApproval) -> entities.SupportRequest:

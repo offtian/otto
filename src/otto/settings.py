@@ -111,6 +111,18 @@ class Settings(BaseSettings):
     sailpoint_mcp_url: str = ""
     sailpoint_mcp_token: str = ""
 
+    # Long-term memory (Cognee, embedded): resolved conversations ingest on
+    # resolution signals and agents search them via the search_memory tool.
+    # Off by default — cognify runs LLM calls through the same gateway as
+    # the agents (llm_*); embeddings need their own OpenAI-compatible
+    # endpoint. Storage backends are Cognee's own env vars (local files by
+    # default; Postgres/pgvector in prod).
+    memory_enabled: bool = False
+    memory_embedding_endpoint: str = ""
+    memory_embedding_model: str = ""
+    memory_embedding_dimensions: int = 0
+    memory_dataset: str = "support_resolutions"
+
     # Team-owned flows (flow graph): YAML of owning teams — the services
     # they own (the routing key) and their specialist sub-agents. Missing
     # file = no team flows; every request falls back to the access/general

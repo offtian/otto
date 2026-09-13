@@ -177,6 +177,7 @@ def wire(monkeypatch):
         directory=(),
         intent_classifier=None,
         access_agent=None,
+        memory=None,
         **settings_overrides,
     ):
         gateway = FakeSlackGateway()
@@ -199,6 +200,7 @@ def wire(monkeypatch):
             agent=support_agent.build_agent(model=model),
             access_agent=access_agent,
             intent_classifier=intent_classifier,
+            memory=memory,
         )
         monkeypatch.setattr(config, "get_config", lambda: cfg)
         return cfg, gateway, model
@@ -480,6 +482,35 @@ class TestKnowledgeAnswerFeedback:
             and call.kwargs["params"]["signal"] == "helpful_vote"
             for call in events.call_args_list
         )
+        assert any(channel == "D1" and "helped" in text for channel, _, text in gateway.messages)
+
+    async def test_a_yes_vote_ingests_the_conversation_into_memory(self, wire):
+        # Given a wired memory store and a resolved thread with history
+        memory = FakeMemoryStore()
+        _cfg, gateway, _ = wire(ScriptedModel([]), memory=memory)
+        gateway.thread = [
+            ("U_REQ", "My VPN fails on hotel wifi"),
+            ("otto", "Restart the client and rejoin the network."),
+            ("U_REQ", "That fixed it, thanks!"),
+        ]
+
+        # When the requester votes that the answer helped
+        await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
+
+        # Then the resolved transcript landed in long-term memory
+        assert len(memory.ingested) == 1
+        assert "Restart the client" in memory.ingested[0]
+
+    async def test_a_memory_outage_never_fails_the_vote(self, wire):
+        # Given a memory store whose backend is down
+        memory = FakeMemoryStore(error=RuntimeError("graph store down"))
+        _cfg, gateway, _ = wire(ScriptedModel([]), memory=memory)
+
+        # When the requester votes that the answer helped
+        await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
+
+        # Then the confirmation still reached the requester — memory is
+        # best-effort, never on the critical path
         assert any(channel == "D1" and "helped" in text for channel, _, text in gateway.messages)
 
     async def test_a_no_vote_escalates_to_a_human(self, wire):
@@ -882,6 +913,26 @@ class TestAuditTrailOfAttempts:
         # Then the expiry is an audit event attributed to the sweep
         events = await cfg.approvals.list_events()
         assert [(e.event_type, e.actor_id) for e in events] == [("expired", "system:sweep")]
+
+
+class FakeMemoryStore:
+    """
+    Records ingests; raises on both calls when an error is given.
+    """
+
+    def __init__(self, error=None):
+        self.error = error
+        self.ingested = []
+
+    async def ingest(self, *, text):
+        if self.error is not None:
+            raise self.error
+        self.ingested.append(text)
+
+    async def search(self, *, query):
+        if self.error is not None:
+            raise self.error
+        return []
 
 
 class FakeIntentClassifier:

@@ -26,10 +26,12 @@ from otto.data import db
 from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals as support_approvals
+from otto.domain.support import memory as support_memory
 from otto.domain.support import policy as support_policy
 from otto.domain.support import teams as support_teams
 from otto.settings import Settings, settings
 from otto.utils import logs
+from otto.vendors import cognee as cognee_vendor
 from otto.vendors import jira as jira_vendor
 from otto.vendors import llm, mcp
 from otto.vendors import slack as slack_vendor
@@ -93,6 +95,26 @@ class Configuration(pydantic.BaseModel):
     team_registry: pydantic.SkipValidation[support_teams.TeamRegistry | None] = None
     specialist_mcps: pydantic.SkipValidation[dict[str, mcp.MCPServerMount] | None] = None
     team_agents: pydantic.SkipValidation[dict[str, _Agent] | None] = None
+    # Long-term memory (Cognee) — None = disabled; the search_memory tool
+    # and the resolution-ingest hook both degrade to no-ops.
+    memory: pydantic.SkipValidation[support_memory.MemoryStore | None] = None
+
+    def load_memory(self) -> None:
+        """
+        Wire the Cognee memory store when enabled — the one deliberately
+        lazy wiring stage: building it imports the heavy cognee package.
+        """
+        if not self.settings.memory_enabled:
+            return
+        self.memory = cognee_vendor.build_memory_store(
+            llm_base_url=self.settings.llm_base_url,
+            llm_api_key=self.settings.llm_api_key,
+            llm_model=self.settings.llm_model,
+            embedding_endpoint=self.settings.memory_embedding_endpoint,
+            embedding_model=self.settings.memory_embedding_model,
+            embedding_dimensions=self.settings.memory_embedding_dimensions,
+            dataset=self.settings.memory_dataset,
+        )
 
     async def load_agents(self) -> None:
         """
@@ -285,4 +307,5 @@ def get_config() -> Configuration:
     config.load_stores()
     config.load_teams()
     config.load_mcps()
+    config.load_memory()
     return config

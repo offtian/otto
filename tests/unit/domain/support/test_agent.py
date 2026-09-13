@@ -24,13 +24,30 @@ class FakeTicketBackend:
         return "triage#1"
 
 
-def _context(runbooks_dir: pathlib.Path, backend=None):
+class FakeMemoryStore:
+    def __init__(self, passages=None, error=None):
+        self.passages = passages or []
+        self.error = error
+        self.queries = []
+
+    async def ingest(self, *, text):
+        raise AssertionError("the search tool must never ingest")
+
+    async def search(self, *, query):
+        self.queries.append(query)
+        if self.error is not None:
+            raise self.error
+        return list(self.passages)
+
+
+def _context(runbooks_dir: pathlib.Path, backend=None, memory=None):
     return tool_context.ToolContext(
         context=support_agent.SupportContext(
             requester_id="U_REQ",
             origin_ref="https://slack.com/archives/C1/p10",
             runbooks_dir=runbooks_dir,
             ticket_backend=backend or FakeTicketBackend(),
+            memory=memory,
         ),
         tool_name="test",
         tool_call_id="call-1",
@@ -111,6 +128,44 @@ class TestEscalateToHuman:
         assert "triage#1" in outcome
 
 
+class TestSearchMemory:
+    async def test_returns_the_stored_passages_best_first(self, tmp_path):
+        # Given a memory store holding two relevant past cases
+        memory = FakeMemoryStore(passages=["Fixed by bumping the base image.", "VPN case."])
+
+        # When the memory tool is invoked
+        answer = await support_agent.search_memory.on_invoke_tool(
+            _context(tmp_path, memory=memory), json.dumps({"query": "template build fails"})
+        )
+
+        # Then the passages come back joined, and the store saw the query
+        assert "bumping the base image" in answer
+        assert memory.queries == ["template build fails"]
+
+    async def test_says_so_when_no_memory_is_configured(self, tmp_path):
+        # Given a context without a memory store
+        # When the memory tool is invoked
+        answer = await support_agent.search_memory.on_invoke_tool(
+            _context(tmp_path), json.dumps({"query": "anything"})
+        )
+
+        # Then the agent gets an explicit answer, not a crash
+        assert "No long-term memory" in answer
+
+    async def test_fails_soft_when_the_store_errors(self, tmp_path):
+        # Given a memory store that raises on search
+        memory = FakeMemoryStore(error=RuntimeError("graph store down"))
+
+        # When the memory tool is invoked
+        answer = await support_agent.search_memory.on_invoke_tool(
+            _context(tmp_path, memory=memory), json.dumps({"query": "anything"})
+        )
+
+        # Then the tool degrades to a proceed-without-it message — memory is
+        # an assist, never a dependency
+        assert "proceed without it" in answer
+
+
 class TestBuildAgent:
     def test_mounts_stub_tools_when_no_mcp_is_configured(self):
         # Given no MCP servers
@@ -123,6 +178,7 @@ class TestBuildAgent:
             "list_runbooks",
             "read_runbook",
             "escalate_to_human",
+            "search_memory",
             "search_knowledge",
             "submit_access_request",
         }
@@ -146,6 +202,7 @@ class TestBuildAgent:
             "list_runbooks",
             "read_runbook",
             "escalate_to_human",
+            "search_memory",
             "confluence_search",
             "submit_access_request",
         }

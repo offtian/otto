@@ -42,6 +42,7 @@ dependencies = [
     "nest-asyncio>=1.6.0",
     "openinference-instrumentation-openai-agents>=1.6.1",
     "dspy>=3.2.1",
+    "cognee>=1.5.4",
 ]
 
 [dependency-groups]
@@ -277,6 +278,11 @@ warn_no_return = true
 [[tool.mypy.overrides]]
 module = "tests.*"
 allow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# cognee ships no py.typed marker; the vendor adapter isolates it anyway.
+module = "cognee.*"
+ignore_missing_imports = true
 
 # Pytest
 # ------

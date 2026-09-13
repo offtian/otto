@@ -182,7 +182,7 @@ def build_team_agents(
     }
     owners: dict[str, agents.Agent[support_agent.SupportContext]] = {}
     for team in registry.teams:
-        tools: list[agents.Tool] = [support_agent.escalate_to_human]
+        tools: list[agents.Tool] = [support_agent.escalate_to_human, support_agent.search_memory]
         tools.extend(
             confluence_tools if confluence_tools is not None else (support_agent.search_knowledge,)
         )

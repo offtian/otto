@@ -14,6 +14,8 @@ import attrs
 from agents.models import interface as model_interface
 
 from otto.domain.support import escalation
+from otto.domain.support import memory as memory_store
+from otto.utils import logs
 
 
 INSTRUCTIONS = """\
@@ -70,6 +72,11 @@ class SupportContext:
     origin_ref: str
     runbooks_dir: pathlib.Path
     ticket_backend: escalation.TicketBackend
+    # Long-term memory of resolved cases; None = not configured, and the
+    # search_memory tool says so instead of failing. The module import is
+    # aliased because `x: ann = value` assigns the value BEFORE evaluating
+    # the annotation — a field named like its module shadows it.
+    memory: memory_store.MemoryStore | None = None
 
 
 @agents.function_tool
@@ -106,6 +113,30 @@ async def submit_access_request(
         f"Access request submitted (stub): {entitlement!r} on {system!r}, "
         f"justification: {justification!r}."
     )
+
+
+@agents.function_tool
+async def search_memory(
+    context: agents.RunContextWrapper[SupportContext],
+    query: str,
+) -> str:
+    """
+    Search Otto's long-term memory of previously resolved support cases —
+    how similar issues were fixed before.
+    """
+    store = context.context.memory
+    if store is None:
+        return "No long-term memory is configured in this environment."
+    try:
+        passages = await store.search(query=query)
+    except Exception as exc:
+        # Memory is an assist, never a dependency: a memory outage must not
+        # take down the answer path.
+        logs.log_exception(exc, params={"tool": "search_memory"})
+        return "Memory search failed — proceed without it."
+    if not passages:
+        return "No relevant past cases found in memory."
+    return "\n\n".join(passages[:5])
 
 
 @agents.function_tool
@@ -164,7 +195,7 @@ def build_agent(
     arrives as pre-wrapped, per-tool-gated ``FunctionTool``s; None mounts
     the local stub tool instead.
     """
-    tools: list[agents.Tool] = [list_runbooks, read_runbook, escalate_to_human]
+    tools: list[agents.Tool] = [list_runbooks, read_runbook, escalate_to_human, search_memory]
     tools.extend(confluence_tools if confluence_tools is not None else (search_knowledge,))
     tools.extend(sailpoint_tools if sailpoint_tools is not None else (submit_access_request,))
     return agents.Agent(
@@ -225,7 +256,7 @@ def build_access_agent(
     access sequence alone. The gated tool keeps its approval requirement —
     routing never changes what needs a human OK.
     """
-    tools: list[agents.Tool] = [escalate_to_human]
+    tools: list[agents.Tool] = [escalate_to_human, search_memory]
     tools.extend(confluence_tools if confluence_tools is not None else (search_knowledge,))
     tools.extend(sailpoint_tools if sailpoint_tools is not None else (submit_access_request,))
     return agents.Agent(
