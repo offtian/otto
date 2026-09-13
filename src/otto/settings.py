@@ -111,6 +111,19 @@ class Settings(BaseSettings):
     sailpoint_mcp_url: str = ""
     sailpoint_mcp_token: str = ""
 
+    # Team-owned flows (flow graph): YAML of owning teams — the services
+    # they own (the routing key) and their specialist sub-agents. Missing
+    # file = no team flows; every request falls back to the access/general
+    # split.
+    team_profiles_file: str = "teams.yaml"
+
+    # Specialist MCP servers, "name:URL" pairs comma-separated — the name is
+    # what a specialist's `mcp:` field in the profiles YAML references. A
+    # specialist without a reachable server runs on instructions alone.
+    specialist_mcp_urls: str = ""
+    # "name:token" pairs for the servers above that need auth.
+    specialist_mcp_tokens: str = ""
+
     # Directory of markdown runbooks the agent can walk users through.
     # Relative paths resolve against the process cwd (repo root for
     # `just run` and the compose app container alike).
@@ -143,6 +156,23 @@ class Settings(BaseSettings):
         """
         pairs = (part.partition(":") for part in self.team_triage_channels.split(","))
         return {team.strip(): channel.strip() for team, _, channel in pairs if channel.strip()}
+
+    @property
+    def specialist_mcp_url_map(self) -> dict[str, str]:
+        """
+        Return name → URL pairs from ``specialist_mcp_urls`` (the partition
+        splits at the first colon, so URLs keep theirs).
+        """
+        pairs = (part.partition(":") for part in self.specialist_mcp_urls.split(","))
+        return {name.strip(): url.strip() for name, _, url in pairs if url.strip()}
+
+    @property
+    def specialist_mcp_token_map(self) -> dict[str, str]:
+        """
+        Return name → token pairs from ``specialist_mcp_tokens``.
+        """
+        pairs = (part.partition(":") for part in self.specialist_mcp_tokens.split(","))
+        return {name.strip(): token.strip() for name, _, token in pairs if token.strip()}
 
 
 # Module-level singleton — the sanctioned direct-object import (the one

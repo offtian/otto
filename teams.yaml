@@ -1,0 +1,43 @@
+# Otto team profiles: owning teams and their specialist sub-agents.
+#
+# A team owns services; when a request mentions them (any intent except an
+# access request), its owner agent handles it and may consult its
+# specialists — several at once, run concurrently. Adding a team or a
+# specialist here is the whole change: no orchestration code.
+#
+# Specialists are read-only by design: `tools` is an explicit allowlist of
+# the named MCP server's tools, and everything allowlisted runs WITHOUT a
+# human approval gate — so list reads only (an approval pause inside a
+# nested specialist run can never be approved). The MCP server itself is
+# named in settings: SPECIALIST_MCP_URLS="coder:http://...,jenkins:http://..."
+# A specialist with no `mcp`/`tools` runs on its instructions alone.
+#
+# teams:
+#   - name: platform
+#     description: Owns Coder workspaces, templates, and CI
+#     services: [coder, jenkins]
+#     specialists: [coder, jenkins]
+#     instructions: |
+#       You own developer-platform issues: Coder workspaces and templates,
+#       and the Jenkins pipelines that build them. Diagnose via your
+#       specialists before answering; template problems are often
+#       engineering changes — say so and offer to escalate as one.
+#
+# specialists:
+#   - name: coder
+#     description: Reads Coder workspaces, templates, and build logs.
+#     mcp: coder
+#     tools: [get_workspace, get_template, get_build_logs]
+#     instructions: |
+#       You are the Coder specialist. Inspect workspaces, templates, and
+#       build logs to explain failures. Report findings crisply; never
+#       guess — say what you could not verify.
+#
+#   - name: jenkins
+#     description: Reads Jenkins jobs, builds, and console output.
+#     mcp: jenkins
+#     tools: [get_job, get_build, get_console_log]
+#     instructions: |
+#       You are the Jenkins specialist. Inspect jobs, builds, and console
+#       output to explain failures. Report findings crisply; never guess —
+#       say what you could not verify.

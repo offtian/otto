@@ -27,6 +27,7 @@ from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals as support_approvals
 from otto.domain.support import policy as support_policy
+from otto.domain.support import teams as support_teams
 from otto.settings import Settings, settings
 from otto.utils import logs
 from otto.vendors import jira as jira_vendor
@@ -85,6 +86,13 @@ class Configuration(pydantic.BaseModel):
     # Routes each inbound request to a flow-graph node; None = no routing,
     # every request runs the general agent, exactly the pre-graph behavior.
     intent_classifier: pydantic.SkipValidation[llm.LLMIntentClassifier | None] = None
+    # Team-owned flows: the profiles registry (data, loaded at get_config),
+    # the read-only specialist MCP mounts, and one owner agent per team
+    # (built by load_agents once the MCP servers are connected). None/empty
+    # = no team flows; requests fall back to the access/general split.
+    team_registry: pydantic.SkipValidation[support_teams.TeamRegistry | None] = None
+    specialist_mcps: pydantic.SkipValidation[dict[str, mcp.MCPServerMount] | None] = None
+    team_agents: pydantic.SkipValidation[dict[str, _Agent] | None] = None
 
     async def load_agents(self) -> None:
         """
@@ -103,6 +111,16 @@ class Configuration(pydantic.BaseModel):
             model=self.model,
             confluence_tools=confluence_tools,
             sailpoint_tools=sailpoint_tools,
+        )
+        specialist_tools = {
+            name: (await _mounted_tools(mount)) or []
+            for name, mount in (self.specialist_mcps or {}).items()
+        }
+        self.team_agents = support_teams.build_team_agents(
+            registry=self.team_registry or support_teams.TeamRegistry(),
+            model=self.model,
+            specialist_mcp_tools=specialist_tools,
+            confluence_tools=confluence_tools,
         )
 
     def load_model(self) -> None:
@@ -207,6 +225,37 @@ class Configuration(pydantic.BaseModel):
         }
         for field, spec in specs.items():
             setattr(self, field, mcp.build_mount(spec=spec) if spec is not None else None)
+        # One read-only mount per specialist that declares both a server and
+        # a tools allowlist. Every allowlisted tool mounts ungated on purpose:
+        # an approval interruption inside a nested specialist run can never be
+        # approved, so the allowlist IS the read-only contract (default-deny —
+        # an unlisted tool never reaches the specialist).
+        urls = self.settings.specialist_mcp_url_map
+        tokens = self.settings.specialist_mcp_token_map
+        self.specialist_mcps = {
+            name: mcp.build_mount(
+                spec=mcp.MCPSpec(
+                    name=name,
+                    url=urls[profile.mcp],
+                    token=tokens.get(profile.mcp, ""),
+                    allowed_tools=profile.tools,
+                    ungated_tools=frozenset(profile.tools),
+                )
+            )
+            for name, profile in (
+                self.team_registry or support_teams.TeamRegistry()
+            ).specialists.items()
+            if profile.mcp and profile.mcp in urls and profile.tools
+        }
+
+    def load_teams(self) -> None:
+        """
+        Load the team-profile registry — data only; the owner agents build in
+        ``load_agents()`` once the specialist MCP servers are connected.
+        """
+        self.team_registry = support_teams.load_registry(
+            pathlib.Path(self.settings.team_profiles_file)
+        )
 
 
 async def _mounted_tools(mount: mcp.MCPServerMount | None) -> list[agents.Tool] | None:
@@ -234,5 +283,6 @@ def get_config() -> Configuration:
     config.load_model()
     config.load_vendors()
     config.load_stores()
+    config.load_teams()
     config.load_mcps()
     return config

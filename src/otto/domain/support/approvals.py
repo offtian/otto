@@ -72,6 +72,9 @@ class PendingApproval:
     # Flow-graph node that suspended for this approval — the resume path
     # re-enters the support graph here, so the right agent is rebuilt.
     node: str = "general"
+    # Durable flow state (``flows.dump_state``: the resolved team, primitives
+    # only), merged back on resume. Empty = nothing beyond the node name.
+    graph_state_json: str = ""
     # Which surface owns this approval ("slack" | "streamlit"): the server's
     # sweep and recovery act only on their own surface's rows — without the
     # tag they would expire dev-chat cards into a nonexistent Slack channel
@@ -569,6 +572,7 @@ def _to_row(approval: PendingApproval) -> dict[str, object]:
         "tool_arguments": approval.tool_arguments,
         "run_state_json": approval.run_state_json,
         "node": approval.node,
+        "graph_state_json": approval.graph_state_json,
         "channel": approval.channel,
         "status": approval.status.value,
         "card_channel": approval.card_channel,
@@ -592,6 +596,7 @@ def _from_row(row: Any) -> PendingApproval:
         tool_arguments=data["tool_arguments"],
         run_state_json=data["run_state_json"] or "",
         node=data["node"],
+        graph_state_json=data["graph_state_json"],
         channel=data["channel"],
         status=ApprovalStatus(data["status"]),
         card_channel=data["card_channel"],

@@ -40,6 +40,12 @@ class ApprovalRecord(SQLModel, table=True):
         default="general",
         sa_column=Column(String, nullable=False, server_default="general"),
     )
+    # Durable flow state for the paused run (flows.dump_state — the resolved
+    # team, primitives only). Empty = nothing beyond the node name.
+    graph_state_json: str = Field(
+        default="",
+        sa_column=Column(Text, nullable=False, server_default=""),
+    )
     # Which surface owns the row ("slack" | "streamlit") — the sweep and the
     # startup recovery act only on their own surface's approvals.
     channel: str = Field(

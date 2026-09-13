@@ -41,7 +41,11 @@ async def handle_support_request(*, request: entities.SupportRequest) -> None:
     outcome = await flows.SUPPORT.run(state)
     if isinstance(outcome, graph.Suspend):
         await _pause_for_approval(
-            request=request, result=outcome.payload, node=outcome.node, cfg=cfg
+            request=request,
+            result=outcome.payload,
+            node=outcome.node,
+            graph_state=flows.dump_state(state),
+            cfg=cfg,
         )
     else:
         await _post_answer(origin=request.origin, text=str(outcome.output.final_output), cfg=cfg)
@@ -105,7 +109,11 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
         # request in the same conversation) — it needs its own card and its
         # own human decision; this approval's decision was still carried out.
         await _pause_for_approval(
-            request=_request_from(pending), result=outcome.payload, node=outcome.node, cfg=cfg
+            request=_request_from(pending),
+            result=outcome.payload,
+            node=outcome.node,
+            graph_state=pending.graph_state_json,
+            cfg=cfg,
         )
     else:
         await _post_reply(origin=pending.origin, text=str(outcome.output.final_output), cfg=cfg)
@@ -354,6 +362,7 @@ async def recover_approvals() -> None:
                     request=_request_from(pending),
                     result=outcome.payload,
                     node=outcome.node,
+                    graph_state=pending.graph_state_json,
                     cfg=cfg,
                 )
             else:
@@ -491,6 +500,7 @@ async def _pause_for_approval(
     request: entities.SupportRequest,
     result: agents.RunResult,
     node: str,
+    graph_state: str,
     cfg: config.Configuration,
 ) -> None:
     # One card still covers the whole run (one decision), but it names every
@@ -536,6 +546,7 @@ async def _pause_for_approval(
         tool_arguments=tool_arguments,
         run_state_json=result.to_state().to_string(),
         node=node,
+        graph_state_json=graph_state,
     )
     requester = await _requester_label(
         user_id=approval.requester_id, origin=request.origin, cfg=cfg
@@ -574,15 +585,18 @@ async def _resume_run(
     Re-enter the support graph at the node that suspended for this approval,
     with the human decision applied to the paused run state.
     """
-    state: graph.State = {
-        "text": pending.request_text,
-        "resume": {"run_state_json": pending.run_state_json, "approved": approved},
-        "ctx": _build_context(
-            requester_id=pending.requester_id,
-            origin=pending.origin,
-            cfg=cfg,
-        ),
-    }
+    state: graph.State = flows.load_state(pending.graph_state_json)
+    state.update(
+        {
+            "text": pending.request_text,
+            "resume": {"run_state_json": pending.run_state_json, "approved": approved},
+            "ctx": _build_context(
+                requester_id=pending.requester_id,
+                origin=pending.origin,
+                cfg=cfg,
+            ),
+        }
+    )
     return await flows.SUPPORT.run(state, entry=pending.node)
 
 

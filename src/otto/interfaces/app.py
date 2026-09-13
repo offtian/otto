@@ -122,9 +122,8 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
             # the process lifetime and closes last on shutdown (the sweep and
             # MCP teardown above it may still query).
             await stack.enter_async_context(db.database())
-        servers = [
-            mount.server for mount in (cfg.confluence_mcp, cfg.sailpoint_mcp) if mount is not None
-        ]
+        mounts = (cfg.confluence_mcp, cfg.sailpoint_mcp, *(cfg.specialist_mcps or {}).values())
+        servers = [mount.server for mount in mounts if mount is not None]
         connected: list[agents_mcp.MCPServerStreamableHttp] = []
         for server in servers:
             try:
