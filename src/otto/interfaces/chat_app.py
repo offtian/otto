@@ -1,6 +1,7 @@
 """
 Streamlit chat surface that mimics the Slack integration on the host: the
-real Otto agent, the same telemetry pipeline (OTLP → Tempo/Langfuse), and
+real support flow graph (intent routing, the access specialist, team-owned
+owner agents), the same telemetry pipeline (OTLP → Tempo/Langfuse), and
 the same HITL approval round-trip (serialized RunState, approve/reject,
 resume) — minus Slack itself.
 
@@ -37,6 +38,7 @@ from opentelemetry import trace as otel_trace
 from sqlalchemy.dialects import postgresql as pg
 
 from otto import config
+from otto.application import flows, graph
 from otto.application import support as support_app
 from otto.data import db
 from otto.data import models as data_models
@@ -44,6 +46,7 @@ from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals as support_approvals
 from otto.domain.support import entities as support_entities
+from otto.domain.support import teams as support_teams
 from otto.settings import settings
 from otto.utils import telemetry
 from otto.vendors import llm
@@ -160,32 +163,50 @@ class _ChatGateway:
             [{"role": "assistant", "content": text}]
         )
 
-
-def _fresh_agent() -> agents.Agent[support_agent.SupportContext]:
-    """
-    Build the agent on the current event loop — the AsyncOpenAI client binds
-    to the loop of the enclosing ``asyncio.run``, so every interaction needs
-    its own. Also re-enables SDK tracing, which ``build_model`` turns off but
-    the logfire→OTLP export depends on.
-    """
-    model = llm.build_model(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model_name=settings.llm_model,
-    )
-    agents.set_tracing_disabled(disabled=False)
-    return support_agent.build_agent(model=model)
+    async def post_approval_card(
+        self, *, channel: str, approval_id: str, requester: str, tool_name: str, summary: str
+    ) -> str:
+        # Only the re-pause path lands here (a resumed run pausing on another
+        # gated call): the chat renders approval cards from its session row,
+        # which this gateway call cannot reach, and the origin reply already
+        # told the user a human OK is needed. ponytail: the follow-up approval
+        # gets no chat buttons — add an approvals-by-origin query and write
+        # pending_state here if chained gated calls become a real dev flow.
+        return "chat"
 
 
 def _wire_runtime(database: databases.Database) -> config.Configuration:
     """
     Point the process-wide configuration at this event loop's resources: the
     chat gateway, the durable stores over the given connection, the yaml user
-    directory, and a freshly-bound agent. Mutating the singleton is safe
-    here — the chat surface is this process's only config consumer.
+    directory, and freshly-bound flow agents — every AsyncOpenAI-backed
+    object (model, agents, intent classifier) binds to the loop of the
+    enclosing ``asyncio.run``, so all of them rebuild per interaction. Also
+    re-enables SDK tracing, which ``build_model`` turns off but the
+    logfire→OTLP export depends on. Mutating the singleton is safe here —
+    the chat surface is this process's only config consumer.
     """
     cfg = config.get_config()
-    cfg.agent = _fresh_agent()
+    model = llm.build_model(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model_name=settings.llm_model,
+    )
+    agents.set_tracing_disabled(disabled=False)
+    cfg.agent = support_agent.build_agent(model=model)
+    cfg.access_agent = support_agent.build_access_agent(model=model)
+    cfg.team_agents = support_teams.build_team_agents(
+        registry=cfg.team_registry or support_teams.TeamRegistry(),
+        model=model,
+        # The dev chat mounts no specialist MCP servers — specialists run
+        # on their instructions alone.
+        specialist_mcp_tools={},
+    )
+    cfg.intent_classifier = llm.build_intent_classifier(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model_name=settings.llm_model,
+    )
     cfg.slack = _ChatGateway(database)  # type: ignore[assignment]
     cfg.triage = _NoopTicketBackend()  # type: ignore[assignment]
     cfg.jira = None
@@ -291,31 +312,42 @@ def _trace_context(meta: dict[str, Any]) -> otel_context.Context:
     return otel_trace.set_span_in_context(parent)
 
 
-def _build() -> tuple[agents.Agent[support_agent.SupportContext], support_agent.SupportContext]:
-    """
-    Build the agent + context fresh per interaction (see ``_fresh_agent``).
-    """
-    context = support_agent.SupportContext(
+def _context(cfg: config.Configuration) -> support_agent.SupportContext:
+    return support_agent.SupportContext(
         requester_id=_REQUESTER_ID,
         origin_ref=_CHANNEL,
         runbooks_dir=pathlib.Path(settings.runbooks_dir),
         ticket_backend=_NoopTicketBackend(),
+        memory=cfg.memory,
     )
-    return _fresh_agent(), context
 
 
-async def _run_turn(chat_id: str, question: str) -> agents.RunResult:
-    agent, context = _build()
+async def _run_turn(chat_id: str, question: str) -> tuple[graph.Suspend | graph.Done, str]:
+    """
+    Run one turn through the real support flow graph — intent routing, team
+    resolution, and all — and return the outcome plus the durable flow state
+    (a suspended turn persists it on the approval, exactly like Slack).
+    """
     async with db.database() as database:
-        session = _DatabaseSession(chat_id, database)
-        return await agents.Runner.run(agent, question, context=context, session=session)
+        cfg = _wire_runtime(database)
+        state: graph.State = {
+            "text": question,
+            "input": question,
+            "ctx": _context(cfg),
+            "session": _DatabaseSession(chat_id, database),
+        }
+        outcome = await flows.SUPPORT.run(state)
+        return outcome, flows.dump_state(state)
 
 
-async def _pause(chat_id: str, result: agents.RunResult, *, question: str) -> None:
+async def _pause(
+    chat_id: str, result: agents.RunResult, *, question: str, node: str, graph_state: str
+) -> None:
     """
     Save the interrupted run as a real ``PendingApproval`` in the production
-    approval store (D1) and note its id on the session row so the card
-    survives reruns and restarts.
+    approval store (D1) — including the flow-graph node and durable flow
+    state, so the resume re-enters the graph exactly like Slack — and note
+    its id on the session row so the card survives reruns and restarts.
     """
     tool, args = support_app.paused_call_fields(result=result)
     approval_id = str(uuid.uuid4())
@@ -330,6 +362,8 @@ async def _pause(chat_id: str, result: agents.RunResult, *, question: str) -> No
                 tool_name=tool,
                 tool_arguments=args,
                 run_state_json=result.to_state().to_string(),
+                node=node,
+                graph_state_json=graph_state,
                 channel=_CHANNEL,
                 card_channel=_CHANNEL,
                 card_ts=chat_id,
@@ -426,14 +460,19 @@ def _bubbles(items: list[Any]) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
     return bubbles, tuple(steps)
 
 
-def _absorb(result: agents.RunResult, *, chat_id: str, question: str) -> None:
+def _absorb(
+    outcome: "graph.Suspend | graph.Done", graph_state: str, *, chat_id: str, question: str
+) -> None:
+    result = outcome.payload if isinstance(outcome, graph.Suspend) else outcome.output
     # The UI-visible thinking bundle rides the enclosing chat_turn/chat_approval
     # span, so the trace shows exactly what the user saw. Dev only (C3): the
     # steps carry tool outputs — KB content — which must not export elsewhere.
     if settings.environment == "dev":
         otel_trace.get_current_span().set_attribute("otto.thinking_steps", list(_steps(result)))
-    if result.interruptions:
-        asyncio.run(_pause(chat_id, result, question=question))
+    if isinstance(outcome, graph.Suspend):
+        asyncio.run(
+            _pause(chat_id, result, question=question, node=outcome.node, graph_state=graph_state)
+        )
     else:
         _clear_pending(chat_id)
     logfire.force_flush()  # make the trace visible in Tempo/Langfuse right away
@@ -604,7 +643,8 @@ def _ask(*, question: str) -> None:
             attributes={"question": question, "chat_id": chat_id},
         ),
     ):
-        _absorb(asyncio.run(_run_turn(chat_id, question)), chat_id=chat_id, question=question)
+        outcome, graph_state = asyncio.run(_run_turn(chat_id, question))
+        _absorb(outcome, graph_state, chat_id=chat_id, question=question)
     st.rerun()
 
 

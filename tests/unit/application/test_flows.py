@@ -140,6 +140,18 @@ class TestSupportGraph:
         run_state.reject.assert_not_called()
         assert run_spy.await_args.args == (mock.sentinel.access_agent, run_state)
 
+    async def test_the_chat_session_rides_the_fresh_run(self, monkeypatch):
+        # Given a state carrying the dev chat's conversation session store
+        _cfg, run_spy = _wire(monkeypatch)
+        state = _state()
+        state["session"] = mock.sentinel.session
+
+        # When the request runs through the support graph
+        await flows.SUPPORT.run(state)
+
+        # Then the session reached the runner for conversation memory
+        assert run_spy.await_args.kwargs["session"] is mock.sentinel.session
+
     async def test_a_team_owned_reading_routes_to_the_owner_agent(self, monkeypatch):
         # Given a troubleshooting reading that mentions a service platform owns
         _cfg, run_spy = _wire(

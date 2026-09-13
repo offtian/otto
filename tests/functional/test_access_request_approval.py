@@ -9,6 +9,7 @@ import json
 from datetime import UTC, datetime
 from unittest import mock
 
+import attrs
 import pytest
 from agents.items import ModelResponse
 from agents.models.interface import Model
@@ -816,6 +817,34 @@ class TestMultiInterruptionCard:
         # Then both approved calls executed on resume
         resumed_input = json.dumps(model.inputs[-1], default=str)
         assert resumed_input.count("stub") >= 2
+
+
+class TestChainedInterruption:
+    async def test_a_resumed_run_that_pauses_again_keeps_its_surface(self, wire):
+        # Given a paused access request owned by the dev-chat surface, whose
+        # approval leads the model straight into a second gated call
+        model = ScriptedModel([[_access_tool_call()], [_second_access_tool_call()]])
+        cfg, gateway, _ = wire(model)
+        await _submit_request()
+        first_id = gateway.cards[0]["approval_id"]
+        first = await cfg.approvals.get(first_id)
+        await cfg.approvals.save(attrs.evolve(first, channel="streamlit"))
+
+        # When an authorized approver approves the first request
+        await support.resolve_approval(
+            approval_id=first_id, resolver_id="U_SUPPORT", approved=True
+        )
+
+        # Then the follow-up pause got its own card and pending approval,
+        # owned by the same surface as the run it continues — never handed
+        # to Slack's sweep/recovery
+        assert len(gateway.cards) == 2
+        second = await cfg.approvals.get(gateway.cards[1]["approval_id"])
+        assert second.status is approvals.ApprovalStatus.PENDING
+        assert second.channel == "streamlit"
+
+        # Then the first decision is fully dispositioned — carried out once
+        assert (await cfg.approvals.get(first_id)).executed_at is not None
 
 
 class TestApprovalRecovery:

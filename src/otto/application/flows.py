@@ -95,7 +95,11 @@ async def _run_agent(
     """
     resume = state.pop("resume", None)
     if resume is None:
-        result = await agents.Runner.run(agent, state["input"], context=state["ctx"])
+        # The optional session is the dev chat's conversation store; the
+        # Slack path reconstructs history into ``input`` instead.
+        result = await agents.Runner.run(
+            agent, state["input"], context=state["ctx"], session=state.get("session")
+        )
     else:
         # The context must be re-supplied via from_string, NOT via Runner.run:
         # a context passed to run() replaces the state's context wrapper, which

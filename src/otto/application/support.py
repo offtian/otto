@@ -108,12 +108,16 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
         # The resumed run hit another gated tool (e.g. a follow-up access
         # request in the same conversation) — it needs its own card and its
         # own human decision; this approval's decision was still carried out.
+        # The surface channel is inherited: a dev-chat re-pause must never
+        # become a Slack-owned row (the sweep would close its card into a
+        # nonexistent Slack channel).
         await _pause_for_approval(
             request=_request_from(pending),
             result=outcome.payload,
             node=outcome.node,
             graph_state=pending.graph_state_json,
             cfg=cfg,
+            channel=pending.channel,
         )
     else:
         await _post_reply(origin=pending.origin, text=str(outcome.output.final_output), cfg=cfg)
@@ -368,6 +372,7 @@ async def recover_approvals() -> None:
                     node=outcome.node,
                     graph_state=pending.graph_state_json,
                     cfg=cfg,
+                    channel=pending.channel,
                 )
             else:
                 await _post_reply(
@@ -507,6 +512,7 @@ async def _pause_for_approval(
     node: str,
     graph_state: str,
     cfg: config.Configuration,
+    channel: str = "slack",
 ) -> None:
     # One card still covers the whole run (one decision), but it names every
     # interrupted call (B3) — the approver never authorizes an unseen tool.
@@ -552,6 +558,7 @@ async def _pause_for_approval(
         run_state_json=result.to_state().to_string(),
         node=node,
         graph_state_json=graph_state,
+        channel=channel,
     )
     requester = await _requester_label(
         user_id=approval.requester_id, origin=request.origin, cfg=cfg
