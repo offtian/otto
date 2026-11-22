@@ -49,7 +49,8 @@ _FOLLOW_UP_PROMPT = (
 # quoted as data.
 _PULL_REQUEST_PROMPT = (
     "[Pull request update — nobody wrote this message; the repository reported "
-    "it.] The pull request you opened for this conversation, {url} ({title!r}), "
+    "it.] The pull request you opened for this conversation, {url} "
+    "({title!r}{where}), "
 )
 _PULL_REQUEST_OUTCOMES = {
     changes.MERGED: "was merged. Tell the requester it is done, briefly.",
@@ -59,9 +60,15 @@ _PULL_REQUEST_OUTCOMES = {
     ),
     changes.CHANGES_REQUESTED: (
         "was reviewed, and the reviewer asked for changes before it can be "
-        "merged: {detail!r}. Tell the requester what was asked. You cannot "
-        "update that pull request; if the fix is a small edit you can make, you "
-        "may propose a new one, which will need approval again."
+        "merged: {detail!r}. Tell the requester what was asked. If the fix "
+        "is an edit you can make, revise that pull request with "
+        "update_pull_request, which will need approval again."
+    ),
+    changes.CHECKS_FAILED: (
+        "has a failing check: {detail!r}. Tell the requester. If the cause is "
+        "something an edit of yours can fix, revise that pull request with "
+        "update_pull_request, which will need approval again; otherwise offer "
+        "to escalate to a human."
     ),
 }
 # The most of a reviewer's comment that is passed on to the agent.
@@ -235,13 +242,39 @@ def pull_request_update(
     :param delivery_id: the host's own id for this delivery — the request id,
         so a redelivery is the same request.
     """
+    # Where it is, in the words the revision tools take.
+    where = f", number {event.number} in {event.repo}" if event.repo and event.number else ""
     return entities.SupportRequest(
         id=f"github:{delivery_id}",
         user_id=event.requester_id,
-        text=_PULL_REQUEST_PROMPT.format(url=event.url, title=event.title)
+        text=_PULL_REQUEST_PROMPT.format(url=event.url, title=event.title, where=where)
         + _PULL_REQUEST_OUTCOMES[event.kind].format(detail=event.detail[:_DETAIL_LIMIT]),
         origin=event.origin,
     )
+
+
+async def check_failure_event(
+    *, failure: changes.CheckFailure, signing_key: str
+) -> changes.PullRequestEvent | None:
+    """
+    Return the event that reports a failed check to the conversation whose
+    pull request it failed on — or None when that is not an open pull request
+    of Otto's, when no repository host is wired, or when the host cannot be
+    asked: with no conversation to tell, there is nothing to report.
+
+    :param failure: the failed check, as the host's webhook described it.
+    :param signing_key: the key Otto's return addresses are signed with.
+    """
+    host = config.get_config().repo_host
+    if host is None:
+        return None
+    try:
+        return await changes.failed_check_event(
+            host=host, failure=failure, signing_key=signing_key
+        )
+    except Exception as exc:
+        logs.log_exception(exc, params={"job": "check_failure_lookup"})
+        return None
 
 
 async def _finish(*, request_id: str) -> None:

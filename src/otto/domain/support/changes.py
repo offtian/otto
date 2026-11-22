@@ -3,9 +3,12 @@ Changes to code and configuration: how Otto turns a provisioning or
 engineering-change request into a pull request on a catalogued repository.
 
 An agent never writes to a repository directly. It reads files, proposes
-exact-match edits, and the one write — ``open_pull_request`` — is a gated
-tool: it pauses for a human approval that shows the edits, and only then
-commits them on a new branch and opens the pull request. From there the
+exact-match edits, and the two writes — ``open_pull_request`` and
+``update_pull_request`` — are gated tools: each pauses for a human approval
+that shows the edits, and only then commits them. The first commits on a new
+branch and opens the pull request. The second adds a commit to a pull request
+Otto opened earlier from the same conversation, and to nothing else, so a
+reviewer's request for changes can be answered in place. From there the
 change is reviewed and merged (or not) under the repository's own rules.
 
 What the approver sees is what gets applied: an edit replaces the one exact
@@ -18,7 +21,10 @@ when it is applied — never left to the model.
 
 A pull request Otto opens carries a signed return address — the
 conversation that asked for it — so that what later happens to it (merged,
-closed, changes requested) can be reported back there (``PullRequestEvent``).
+closed, changes requested, a failed check) can be reported back there
+(``PullRequestEvent``). The same address is how Otto later knows a pull
+request is its own to revise: no address signed with its key, or one for
+another conversation, and the pull request is left alone.
 
 Two ports. ``RepoHost`` is wherever repositories live: GitHub
 (``vendors/github``), or a local directory (``LocalRepoHost``) in dev.
@@ -48,6 +54,10 @@ from otto.utils import logs
 
 
 OPEN_PULL_REQUEST = "open_pull_request"
+UPDATE_PULL_REQUEST = "update_pull_request"
+
+# Every branch Otto creates starts with this, and it revises no other.
+_BRANCH_PREFIX = "otto/"
 
 # The most of a proposal an approval card shows before it is cut short — a
 # Slack section block holds 3,000 characters and the card has its own text.
@@ -104,6 +114,26 @@ class StagedFile:
     after: str
 
 
+@attrs.frozen
+class PullRequest:
+    """
+    An existing pull request, as its host reports it.
+    """
+
+    number: int
+    url: str
+    title: str
+    body: str
+    # The branch it proposes, the commit that branch is at, and the branch
+    # it proposes them to.
+    branch: str
+    head: str
+    base: str
+    open: bool
+    # False when the branch lives in another repository (a fork).
+    same_repo: bool
+
+
 class EditRejected(Exception):
     """
     Raised when a proposed change may not or cannot be applied. The message
@@ -113,8 +143,10 @@ class EditRejected(Exception):
 
 class RepoHost(Protocol):
     """
-    Where repositories live. Reads see a branch as it is now; the one write
-    never touches an existing branch.
+    Where repositories live. Reads see a branch or a commit as it is now.
+    There are two writes: one opens a pull request on a branch of its own,
+    the other adds a commit to a branch that already exists — which branch
+    that may be is the caller's rule (``find_revisable``), not the host's.
     """
 
     async def read_file(self, *, repo: str, path: str, ref: str) -> str | None:
@@ -147,10 +179,30 @@ class RepoHost(Protocol):
         """
         ...
 
+    async def get_pull_request(self, *, repo: str, number: int) -> Mapping[str, Any] | None:
+        """
+        Return a pull request's fields — ``number``, ``url``, ``title``,
+        ``body``, ``branch``, ``head`` (the commit the branch is at),
+        ``base``, ``open`` and ``same_repo`` (False for a fork's branch) — or
+        None when the repository has no pull request with that number.
+        """
+        ...
+
+    async def push_commit(
+        self, *, repo: str, branch: str, parent: str, message: str, files: Mapping[str, str]
+    ) -> None:
+        """
+        Add one commit with ``files`` (path → full new content) to an
+        existing ``branch``, on top of the commit ``parent``. Raises when the
+        branch has moved on from ``parent``: it is never forced.
+        """
+        ...
+
 
 MERGED = "merged"
 CLOSED = "closed"
 CHANGES_REQUESTED = "changes_requested"
+CHECKS_FAILED = "checks_failed"
 
 
 @attrs.frozen
@@ -160,14 +212,35 @@ class PullRequestEvent:
     conversation that asked for it.
     """
 
-    # MERGED, CLOSED (without merging) or CHANGES_REQUESTED.
+    # MERGED, CLOSED (without merging), CHANGES_REQUESTED or CHECKS_FAILED.
     kind: str
     url: str
     title: str
     origin: entities.Origin
     requester_id: str
-    # A reviewer's own words, for CHANGES_REQUESTED. Untrusted.
+    # A reviewer's own words for CHANGES_REQUESTED; the name and address of
+    # the failed check for CHECKS_FAILED. Untrusted.
     detail: str = ""
+    # Where the pull request is, for revising it. Empty when not known.
+    repo: str = ""
+    number: int = 0
+
+
+@attrs.frozen
+class CheckFailure:
+    """
+    A check that failed on a pull request, as its host reports it — before
+    anyone has looked at whose pull request that is.
+    """
+
+    repo: str
+    number: int
+    # What failed, and where a person can read why.
+    name: str
+    url: str
+    # The commit it failed on: a conversation hears once per commit, however
+    # many checks fail on it.
+    commit: str
 
 
 @attrs.frozen
@@ -229,11 +302,12 @@ def apply_edit(*, content: str | None, edit: FileEdit) -> str:
 
 
 async def stage(
-    *, host: RepoHost, profile: RepoProfile, edits: Sequence[FileEdit]
+    *, host: RepoHost, profile: RepoProfile, edits: Sequence[FileEdit], ref: str | None = None
 ) -> list[StagedFile]:
     """
     Return every file the edits touch as they would leave it, read from the
-    repository's base branch and edited in the order given.
+    repository's base branch — or from ``ref``, when a pull request is being
+    revised — and edited in the order given.
 
     :raises EditRejected: if there are no edits, a path is outside the
         profile's allowlist, or an edit does not apply.
@@ -250,34 +324,189 @@ async def stage(
                 f"({', '.join(profile.paths) or 'none'})"
             )
         if path not in before:
-            before[path] = await host.read_file(repo=profile.name, path=path, ref=profile.base)
+            before[path] = await host.read_file(
+                repo=profile.name, path=path, ref=ref or profile.base
+            )
         current = after.get(path, before[path])
         after[path] = apply_edit(content=current, edit=attrs.evolve(edit, path=path))
     return [StagedFile(path=path, before=before[path], after=after[path]) for path in after]
 
 
 async def stage_proposal(
-    *, host: RepoHost, profiles: Mapping[str, RepoProfile], arguments: Mapping[str, Any]
+    *,
+    host: RepoHost,
+    profiles: Mapping[str, RepoProfile],
+    arguments: Mapping[str, Any],
+    revision: bool = False,
+    origin: entities.Origin | None = None,
+    signing_key: str = "",
 ) -> tuple[RepoProfile, list[StagedFile]]:
     """
-    Return the repository profile and staged files of an ``open_pull_request``
+    Return the repository profile and staged files of a pull request
     proposal — the one check of whether it may and can be applied, run when
     the approver is asked and again when the approved call executes.
 
+    :param revision: whether the proposal is an ``update_pull_request`` call
+        (``stage_revision``) rather than an ``open_pull_request`` one. Told
+        by the tool that was called, never by what its arguments look like.
+    :param origin: the conversation proposing, and ``signing_key`` the key
+        its pull requests are signed with — what a revision is checked
+        against. A new pull request needs neither.
     :raises EditRejected: if the repository is not catalogued, the proposal
         is too long to show in full on its approval card, a path is outside
-        the allowlist, or an edit does not apply.
+        the allowlist, an edit does not apply, or the pull request to revise
+        is not one this conversation may revise.
     """
-    repo = str(arguments.get("repo", ""))
+    if revision:
+        profile, _, staged = await stage_revision(
+            host=host,
+            profiles=profiles,
+            arguments=arguments,
+            origin=origin,
+            signing_key=signing_key,
+        )
+        return profile, staged
+    profile = _catalogued(profiles, str(arguments.get("repo", "")))
+    ensure_reviewable(arguments)
+    staged = await stage(host=host, profile=profile, edits=_edits(arguments.get("edits") or []))
+    return profile, staged
+
+
+async def stage_revision(
+    *,
+    host: RepoHost,
+    profiles: Mapping[str, RepoProfile],
+    arguments: Mapping[str, Any],
+    origin: entities.Origin | None,
+    signing_key: str,
+) -> tuple[RepoProfile, PullRequest, list[StagedFile]]:
+    """
+    Return the profile, the pull request and the staged files of an
+    ``update_pull_request`` proposal: its edits applied to the files as they
+    are at the commit the pull request's branch is at.
+
+    :raises EditRejected: for everything ``stage_proposal`` refuses, and if
+        the pull request is not one this conversation may revise
+        (``find_revisable``).
+    """
+    profile = _catalogued(profiles, str(arguments.get("repo", "")))
+    ensure_reviewable(arguments, revision=True)
+    pull = await find_revisable(
+        host=host,
+        profile=profile,
+        number=_number(arguments),
+        origin=origin,
+        signing_key=signing_key,
+    )
+    staged = await stage(
+        host=host, profile=profile, edits=_edits(arguments.get("edits") or []), ref=pull.head
+    )
+    return profile, pull, staged
+
+
+async def find_revisable(
+    *,
+    host: RepoHost,
+    profile: RepoProfile,
+    number: int,
+    origin: entities.Origin | None,
+    signing_key: str,
+) -> PullRequest:
+    """
+    Return pull request ``number`` if it is one this conversation may read
+    at its branch and add a commit to: open, on a branch Otto created in this
+    repository, proposed to the profile's base branch, and carrying the
+    return address of this very conversation, signed with ``signing_key``.
+
+    Everything else is refused in the same words, whatever the reason — a
+    pull request that is not Otto's must not be told apart by probing.
+
+    ponytail: the address is not bound to the branch, so one copied into
+    another pull request on an ``otto/`` branch of this repository would
+    pass. Whoever can push that branch can already change it themselves;
+    sign the branch name into the address if that ever stops being true.
+
+    :raises EditRejected: if there is no such pull request, it is closed, or
+        it is not this conversation's to revise.
+    """
+    fields = await host.get_pull_request(repo=profile.name, number=number)
+    if fields is None:
+        raise EditRejected(f"there is no pull request #{number} in {profile.name}")
+    pull = _pull_request(fields)
+    if not pull.open:
+        raise EditRejected(f"pull request #{number} is closed — propose a new one instead")
+    address = read_return_address(pull.body, key=signing_key)
+    ours = (
+        address is not None
+        and origin is not None
+        and address[0] == origin
+        and pull.same_repo
+        and pull.branch.startswith(_BRANCH_PREFIX)
+        and pull.base == profile.base
+    )
+    if not ours:
+        raise EditRejected(
+            f"pull request #{number} was not opened from this conversation, so it cannot "
+            "be revised from here — propose a new one instead"
+        )
+    return pull
+
+
+async def failed_check_event(
+    *, host: RepoHost, failure: CheckFailure, signing_key: str
+) -> PullRequestEvent | None:
+    """
+    Return the event that tells a conversation a check failed on the pull
+    request it asked for — or None when the pull request is gone, closed, or
+    carries no return address that ``signing_key`` signed: not Otto's.
+    """
+    fields = await host.get_pull_request(repo=failure.repo, number=failure.number)
+    if fields is None:
+        return None
+    pull = _pull_request(fields)
+    address = read_return_address(pull.body, key=signing_key)
+    if not pull.open or address is None:
+        return None
+    origin, requester_id = address
+    return PullRequestEvent(
+        kind=CHECKS_FAILED,
+        url=pull.url,
+        title=pull.title,
+        origin=origin,
+        requester_id=requester_id,
+        detail=f"{failure.name} — {failure.url}",
+        repo=failure.repo,
+        number=failure.number,
+    )
+
+
+def _pull_request(fields: Mapping[str, Any]) -> PullRequest:
+    return PullRequest(
+        number=int(fields["number"]),
+        url=str(fields["url"]),
+        title=str(fields["title"]),
+        body=str(fields["body"] or ""),
+        branch=str(fields["branch"]),
+        head=str(fields["head"]),
+        base=str(fields["base"]),
+        open=bool(fields["open"]),
+        same_repo=bool(fields["same_repo"]),
+    )
+
+
+def _catalogued(profiles: Mapping[str, RepoProfile], repo: str) -> RepoProfile:
     if repo not in profiles:
         raise EditRejected(
             f"{repo!r} is not a repository you may work in — use one of: " + ", ".join(profiles)
         )
-    ensure_reviewable(arguments)
-    staged = await stage(
-        host=host, profile=profiles[repo], edits=_edits(arguments.get("edits") or [])
-    )
-    return profiles[repo], staged
+    return profiles[repo]
+
+
+def _number(arguments: Mapping[str, Any]) -> int:
+    number = arguments.get("number")
+    if isinstance(number, bool) or not str(number).isdigit():
+        raise EditRejected("give the number of the pull request to revise")
+    return int(str(number))
 
 
 def render_diff(files: Sequence[StagedFile]) -> str:
@@ -298,17 +527,22 @@ def render_diff(files: Sequence[StagedFile]) -> str:
     return "\n".join(lines)
 
 
-def render_proposal(arguments: Mapping[str, Any]) -> str:
+def render_proposal(arguments: Mapping[str, Any], *, revision: bool = False) -> str:
     """
-    Render a paused ``open_pull_request`` call as mrkdwn for its approval
-    card: the repository, the title and summary, then every edit as the
-    lines it removes and the lines it adds — exactly what approval applies.
+    Render a paused pull request proposal as mrkdwn for its approval card:
+    the repository, the title and summary — or, for a revision, the pull
+    request it adds a commit to — then every edit as the lines it removes
+    and the lines it adds: exactly what approval applies.
 
     A proposal too long for the card is cut short and says that approving it
     applies nothing: ``ensure_reviewable`` refuses it when the call runs, so
     a decision never covers lines the approver could not see.
+
+    :param revision: whether the paused call is ``update_pull_request``. The
+        card says "revises" only for the tool that revises: what the call's
+        arguments look like must never decide what the approver is told.
     """
-    rendered = _rendered(arguments)
+    rendered = _rendered(arguments, revision=revision)
     if len(rendered) <= _CARD_LIMIT:
         return rendered
     cut = rendered[:_CARD_LIMIT]
@@ -320,13 +554,13 @@ def render_proposal(arguments: Mapping[str, Any]) -> str:
     )
 
 
-def ensure_reviewable(arguments: Mapping[str, Any]) -> None:
+def ensure_reviewable(arguments: Mapping[str, Any], *, revision: bool = False) -> None:
     """
     Check that a proposal fits on its approval card in full.
 
     :raises EditRejected: if it would be cut short there.
     """
-    size = len(_rendered(arguments))
+    size = len(_rendered(arguments, revision=revision))
     if size > _CARD_LIMIT:
         raise EditRejected(
             f"the change is too long to show in full on its approval card ({size} "
@@ -334,12 +568,21 @@ def ensure_reviewable(arguments: Mapping[str, Any]) -> None:
         )
 
 
-def _rendered(arguments: Mapping[str, Any]) -> str:
-    parts = [
-        f"*Repository:* `{arguments.get('repo', '')}`",
-        f"*Pull request:* {arguments.get('title', '')}",
-        str(arguments.get("summary", "")),
-    ]
+def _rendered(arguments: Mapping[str, Any], *, revision: bool) -> str:
+    parts = [f"*Repository:* `{arguments.get('repo', '')}`"]
+    if revision:
+        # Digits only: the number comes from the model like everything else
+        # on the card, and nothing but a number belongs after the "#".
+        number = str(arguments.get("number"))
+        parts += [
+            f"*Revises pull request:* #{number if number.isdigit() else '?'}",
+            str(arguments.get("message", "")),
+        ]
+    else:
+        parts += [
+            f"*Pull request:* {arguments.get('title', '')}",
+            str(arguments.get("summary", "")),
+        ]
     for edit in arguments.get("edits") or []:
         if not isinstance(edit, Mapping):
             continue
@@ -461,18 +704,29 @@ _GUIDANCE = """\
   the user — never invent a name, a size or an owner.
 """
 
+_REVISION_GUIDANCE = """\
+  When a reviewer asks for changes to a pull request you opened in this
+  conversation, or a check fails on it, revise that pull request rather than
+  opening another: read its files with read_pull_request_file, call
+  preview_update until your edits apply cleanly, then call
+  update_pull_request. It needs a human approval like the first one did.
+"""
 
-def guidance(repos: Sequence[RepoProfile]) -> str:
+
+def guidance(repos: Sequence[RepoProfile], *, revisions: bool = False) -> str:
     """
     Return what the agent that mounts the repository tools is told about
     them: which repositories, which paths, and the order of work.
+
+    :param revisions: whether the tools for revising a pull request are
+        mounted with them.
     """
     listed = "\n".join(
         f"  - {repo.name} (branch {repo.base}): {repo.description or 'no description'} "
         f"Changeable paths: {', '.join(repo.paths) or 'none'}."
         for repo in repos
     )
-    return _GUIDANCE.format(repos=listed)
+    return _GUIDANCE.format(repos=listed) + (_REVISION_GUIDANCE if revisions else "")
 
 
 class EditArguments(TypedDict):
@@ -492,8 +746,8 @@ _UNREACHABLE = "The repository could not be reached — say so and offer to esca
 class RepoTools:
     """
     The repository tools, bound to the catalogued repositories and the host
-    they live on. Listing, reading and previewing run
-    freely; ``open_pull_request`` — the only write — always pauses for
+    they live on. Listing, reading and previewing run freely; the two writes
+    — ``open_pull_request`` and ``update_pull_request`` — always pause for
     approval, so these belong on top-level agents only.
 
     Every tool refuses a repository outside ``profiles``, and none raises:
@@ -504,18 +758,28 @@ class RepoTools:
     profiles: Mapping[str, RepoProfile]
     host: RepoHost
     # Signs the return address each pull request carries. Empty = none is
-    # written, and nothing that happens to the pull request is reported back.
+    # written, nothing that happens to the pull request is reported back,
+    # and no pull request can be recognised as one to revise.
     signing_key: str = attrs.field(default="", repr=False)
 
     def as_tools(self) -> list[agents.Tool]:
         """
-        Return all four tools, ready to mount on a top-level agent.
+        Return the tools, ready to mount on a top-level agent: the four for
+        proposing a change and — when there is a key to recognise Otto's own
+        pull requests by — the three for revising one.
         """
-        return [
+        tools = [
             *self.read_only_tools(),
             agents.function_tool(self.preview_change),
             agents.function_tool(self.open_pull_request, needs_approval=True),
         ]
+        if self.signing_key:
+            tools += [
+                agents.function_tool(self.read_pull_request_file),
+                agents.function_tool(self.preview_update),
+                agents.function_tool(self.update_pull_request, needs_approval=True),
+            ]
+        return tools
 
     def read_only_tools(self) -> list[agents.Tool]:
         """
@@ -573,13 +837,66 @@ class RepoTools:
             ),
         )
 
+    async def read_pull_request_file(
+        self,
+        context: agents.RunContextWrapper[support_agent.SupportContext],
+        repo: str,
+        number: int,
+        path: str,
+    ) -> str:
+        """
+        Return the content of one file as it is on a pull request you opened
+        earlier in this conversation — its own branch, not the base branch.
+        Read a file here before you revise it.
+        """
+        return await _answered(
+            "read_pull_request_file",
+            self._read_revision(context=context.context, repo=repo, number=number, path=path),
+        )
+
+    async def preview_update(
+        self,
+        context: agents.RunContextWrapper[support_agent.SupportContext],
+        repo: str,
+        number: int,
+        edits: list[EditArguments],
+    ) -> str:
+        """
+        Check that a set of edits applies cleanly to a pull request you
+        opened earlier in this conversation and return the resulting diff,
+        without changing anything. The same edits as preview_change, applied
+        to the files as they are on the pull request. Always preview before
+        update_pull_request.
+        """
+        return await _answered(
+            "preview_update",
+            self._preview_revision(context=context.context, repo=repo, number=number, edits=edits),
+        )
+
+    async def update_pull_request(
+        self,
+        context: agents.RunContextWrapper[support_agent.SupportContext],
+        repo: str,
+        number: int,
+        message: str,
+        edits: list[EditArguments],
+    ) -> str:
+        """
+        Add a commit with a set of edits to a pull request you opened earlier
+        in this conversation — after a reviewer asked for changes, or a check
+        failed. Requires human approval before it runs; the approver sees
+        these exact edits. message says what this revision changes, for the
+        reviewer.
+        """
+        return await _answered(
+            UPDATE_PULL_REQUEST,
+            self._update(
+                context=context.context, repo=repo, number=number, message=message, edits=edits
+            ),
+        )
+
     def _profile(self, repo: str) -> RepoProfile:
-        if repo not in self.profiles:
-            raise EditRejected(
-                f"{repo!r} is not a repository you may work in — use one of: "
-                + ", ".join(self.profiles)
-            )
-        return self.profiles[repo]
+        return _catalogued(self.profiles, repo)
 
     async def _list(self, *, repo: str, path: str) -> str:
         profile = self._profile(repo)
@@ -591,11 +908,65 @@ class RepoTools:
     async def _read(self, *, repo: str, path: str) -> str:
         profile = self._profile(repo)
         content = await self.host.read_file(repo=profile.name, path=path, ref=profile.base)
-        if content is None:
-            return f"{path} does not exist in {repo}."
-        if len(content) > _READ_LIMIT:
-            return content[:_READ_LIMIT] + "\n…(the file continues; this is its beginning)"
-        return content
+        return _shown(content, path=path, where=repo)
+
+    async def _read_revision(
+        self, *, context: support_agent.SupportContext, repo: str, number: int, path: str
+    ) -> str:
+        profile = self._profile(repo)
+        pull = await find_revisable(
+            host=self.host,
+            profile=profile,
+            number=number,
+            origin=context.origin,
+            signing_key=self.signing_key,
+        )
+        content = await self.host.read_file(repo=profile.name, path=path, ref=pull.head)
+        return _shown(content, path=path, where=f"pull request #{number}")
+
+    async def _preview_revision(
+        self,
+        *,
+        context: support_agent.SupportContext,
+        repo: str,
+        number: int,
+        edits: Sequence[Mapping[str, Any]],
+    ) -> str:
+        _, _, staged = await stage_revision(
+            host=self.host,
+            profiles=self.profiles,
+            arguments={"repo": repo, "number": number, "edits": edits},
+            origin=context.origin,
+            signing_key=self.signing_key,
+        )
+        return render_diff(staged)
+
+    async def _update(
+        self,
+        *,
+        context: support_agent.SupportContext,
+        repo: str,
+        number: int,
+        message: str,
+        edits: Sequence[Mapping[str, Any]],
+    ) -> str:
+        profile, pull, staged = await stage_revision(
+            host=self.host,
+            profiles=self.profiles,
+            arguments={"repo": repo, "number": number, "message": message, "edits": edits},
+            origin=context.origin,
+            signing_key=self.signing_key,
+        )
+        # On top of the commit the edits were staged against: had the branch
+        # moved since, the host refuses rather than write over it.
+        await self.host.push_commit(
+            repo=profile.name,
+            branch=pull.branch,
+            parent=pull.head,
+            message=message.strip() or "Revise the change",
+            files={file.path: file.after for file in staged},
+        )
+        return f"Pull request updated: {pull.url}"
 
     async def _preview(self, *, repo: str, edits: Sequence[Mapping[str, Any]]) -> str:
         _, staged = await stage_proposal(
@@ -620,12 +991,24 @@ class RepoTools:
         url = await self.host.open_pull_request(
             repo=profile.name,
             base=profile.base,
-            branch=f"otto/{_slug(title)}-{uuid.uuid4().hex[:8]}",
+            branch=f"{_BRANCH_PREFIX}{_slug(title)}-{uuid.uuid4().hex[:8]}",
             title=title,
             body=pull_request_body(summary=summary, context=context, signing_key=self.signing_key),
             files={file.path: file.after for file in staged},
         )
         return f"Pull request opened: {url}"
+
+
+def _shown(content: str | None, *, path: str, where: str) -> str:
+    """
+    Return a file's content as a read hands it to the model: capped, and a
+    plain sentence when the file is not there.
+    """
+    if content is None:
+        return f"{path} does not exist in {where}."
+    if len(content) > _READ_LIMIT:
+        return content[:_READ_LIMIT] + "\n…(the file continues; this is its beginning)"
+    return content
 
 
 async def _answered(tool: str, operation: Awaitable[str]) -> str:
@@ -663,7 +1046,8 @@ class LocalRepoHost:
     (``<root>/<owner>/<name>/…``) — the dev stand-in for a real host. Reads
     are real; "opening a pull request" writes nothing and returns a
     placeholder address, so the whole flow, approval included, runs with no
-    GitHub. ``ref`` is ignored: the directory is the branch.
+    GitHub. ``ref`` is ignored: the directory is the branch. It keeps no
+    pull requests, so there is never one to revise.
     """
 
     root: pathlib.Path
@@ -696,6 +1080,16 @@ class LocalRepoHost:
             "local_pull_request", params={"repo": repo, "branch": branch, "files": len(files)}
         )
         return f"local://{repo}/pull/{branch}"
+
+    async def get_pull_request(self, *, repo: str, number: int) -> Mapping[str, Any] | None:
+        return None
+
+    async def push_commit(
+        self, *, repo: str, branch: str, parent: str, message: str, files: Mapping[str, str]
+    ) -> None:
+        logs.log_event(
+            "local_commit", params={"repo": repo, "branch": branch, "files": len(files)}
+        )
 
     def _resolve(self, repo: str, path: str) -> pathlib.Path:
         base = (self.root / repo).resolve()
@@ -736,8 +1130,9 @@ def _slug(title: str) -> str:
 
 def proposal_arguments(tool_arguments: str) -> Mapping[str, Any] | None:
     """
-    Return a paused call's arguments when they are an ``open_pull_request``
-    proposal — a repository plus edits — and None for anything else.
+    Return a paused call's arguments when they are a pull request proposal
+    — a repository plus edits, to open one or to revise one — and None for
+    anything else.
     """
     try:
         arguments = json.loads(tool_arguments)

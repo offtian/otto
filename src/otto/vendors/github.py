@@ -1,9 +1,11 @@
 """
 GitHub REST wrapper — no business logic. ``GitHubRepoHost`` structurally
-implements the domain ``RepoHost`` port (``domain/support/changes``): two
-reads off a branch, and one write that never touches an existing branch — a
-new branch, one commit, one pull request. Webhook-signature verification
-lives here too, so the interface layer stays translation-only.
+implements the domain ``RepoHost`` port (``domain/support/changes``): reads
+off a branch or a commit, one write that never touches an existing branch —
+a new branch, one commit, one pull request — and one that adds a commit to a
+branch it is given, never forced. Which branch that may be is the caller's
+rule, not this module's. Webhook-signature verification lives here too, so
+the interface layer stays translation-only.
 
 The token should be a GitHub App installation token or a fine-grained PAT
 scoped to the catalogued repositories with Contents and Pull requests
@@ -104,7 +106,67 @@ class GitHubRepoHost:
         head = (await self._get(f"/repos/{repo}/git/ref/heads/{urllib.parse.quote(base)}"))[
             "object"
         ]["sha"]
-        base_tree = (await self._get(f"/repos/{repo}/git/commits/{head}"))["tree"]["sha"]
+        commit = await self._commit(repo=repo, parent=head, message=title, files=files)
+        await self._post(f"/repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": commit})
+        pull = await self._post(
+            f"/repos/{repo}/pulls", {"title": title, "head": branch, "base": base, "body": body}
+        )
+        return str(pull["html_url"])
+
+    async def get_pull_request(self, *, repo: str, number: int) -> Mapping[str, Any] | None:
+        """
+        Return a pull request's fields as the ``RepoHost`` port names them,
+        or None when the repository has no pull request with that number.
+
+        :raises httpx.HTTPStatusError: if GitHub refuses the read.
+        """
+        response = await self.client.get(f"/repos/{repo}/pulls/{number}")
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return None
+        response.raise_for_status()
+        pull = response.json()
+        head, base = pull["head"], pull["base"]
+        return {
+            "number": pull["number"],
+            "url": pull["html_url"],
+            "title": pull["title"],
+            "body": pull.get("body") or "",
+            "branch": head["ref"],
+            "head": head["sha"],
+            "base": base["ref"],
+            "open": pull["state"] == "open",
+            # A fork that has since been deleted reports no repository at all.
+            "same_repo": (head.get("repo") or {}).get("full_name") == base["repo"]["full_name"],
+        }
+
+    async def push_commit(
+        self, *, repo: str, branch: str, parent: str, message: str, files: Mapping[str, str]
+    ) -> None:
+        """
+        Add one commit with ``files`` (path → full new content) to an
+        existing ``branch``, on top of the commit ``parent``.
+
+        The branch is moved without force, so if it is no longer at
+        ``parent`` GitHub refuses the move and the new commit is left
+        unreferenced: nobody's work on the branch is written over.
+
+        :raises httpx.HTTPStatusError: if GitHub refuses any step.
+        """
+        commit = await self._commit(repo=repo, parent=parent, message=message, files=files)
+        response = await self.client.patch(
+            f"/repos/{repo}/git/refs/heads/{urllib.parse.quote(branch)}",
+            json={"sha": commit, "force": False},
+        )
+        response.raise_for_status()
+
+    async def _commit(
+        self, *, repo: str, parent: str, message: str, files: Mapping[str, str]
+    ) -> str:
+        """
+        Create one commit with ``files`` on top of ``parent`` and return its
+        id. Nothing refers to it until a branch is pointed at it.
+        """
+        base_tree = (await self._get(f"/repos/{repo}/git/commits/{parent}"))["tree"]["sha"]
         tree = await self._post(
             f"/repos/{repo}/git/trees",
             {
@@ -117,15 +179,9 @@ class GitHubRepoHost:
         )
         commit = await self._post(
             f"/repos/{repo}/git/commits",
-            {"message": title, "tree": tree["sha"], "parents": [head]},
+            {"message": message, "tree": tree["sha"], "parents": [parent]},
         )
-        await self._post(
-            f"/repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": commit["sha"]}
-        )
-        pull = await self._post(
-            f"/repos/{repo}/pulls", {"title": title, "head": branch, "base": base, "body": body}
-        )
-        return str(pull["html_url"])
+        return str(commit["sha"])
 
     async def _get(self, url: str) -> Any:
         response = await self.client.get(url)

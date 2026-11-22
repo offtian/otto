@@ -625,13 +625,17 @@ async def _pause_for_approval(
     )
     # Worked out before the card goes up, so it is there when the approver
     # reads it — a card can be decided seconds after it appears.
-    note = await _proposal_note(tool_arguments=tool_arguments, cfg=cfg)
+    note = await _proposal_note(
+        tool_name=tool_name, tool_arguments=tool_arguments, origin=request.origin, cfg=cfg
+    )
     card_ts = await cfg.slack.post_approval_card(
         channel=cfg.settings.slack_triage_channel,
         approval_id=approval.id,
         requester=requester,
         tool_name=approval.tool_name,
-        summary=_approval_summary(tool_arguments=approval.tool_arguments),
+        summary=_approval_summary(
+            tool_name=approval.tool_name, tool_arguments=approval.tool_arguments
+        ),
     )
     await cfg.approvals.save(
         attrs.evolve(
@@ -661,13 +665,16 @@ async def _pause_for_approval(
     )
 
 
-async def _proposal_note(*, tool_arguments: str, cfg: config.Configuration) -> str | None:
+async def _proposal_note(
+    *, tool_name: str, tool_arguments: str, origin: entities.Origin, cfg: config.Configuration
+) -> str | None:
     """
     Return what the approver should know about a paused pull request
-    proposal beyond its edits, as mrkdwn for the card's thread: that it will
-    not apply as proposed, or an independent reviewer's opinion of it. None
-    when there is nothing to add — the paused call is not a proposal, there
-    is nothing to check it against, or the reviewer could not be reached.
+    proposal — a new one, or a revision of one — beyond its edits, as mrkdwn
+    for the card's thread: that it will not apply as proposed, or an
+    independent reviewer's opinion of it. None when there is nothing to add —
+    the paused call is not a proposal, there is nothing to check it against,
+    or the reviewer could not be reached.
 
     Advisory by construction: nothing here approves, blocks or changes the
     proposal, and every failure degrades to the card alone.
@@ -680,11 +687,16 @@ async def _proposal_note(*, tool_arguments: str, cfg: config.Configuration) -> s
             host=cfg.repo_host,
             profiles={repo.name: repo for repo in cfg.catalog.repos},
             arguments=proposal,
+            revision=tool_name == changes.UPDATE_PULL_REQUEST,
+            # What a revision is checked against: only this conversation's
+            # own pull request may be revised from it.
+            origin=origin,
+            signing_key=cfg.settings.github_webhook_secret,
         )
     except changes.EditRejected as exc:
         return (
             f":warning: *This change will not apply as proposed:* {exc}. "
-            "Approving it opens nothing."
+            "Approving it changes nothing."
         )
     except Exception as exc:
         logs.log_exception(exc, params={"job": "proposal_preflight"})
@@ -696,8 +708,11 @@ async def _proposal_note(*, tool_arguments: str, cfg: config.Configuration) -> s
         async with asyncio.timeout(_REVIEW_TIMEOUT_SECONDS):
             review = await cfg.change_reviewer.review(
                 profile=profile,
-                title=str(proposal.get("title", "")),
-                summary=str(proposal.get("summary", "")),
+                # A revision has no title of its own, only what it changes.
+                title=str(
+                    proposal.get("title") or f"Revise pull request #{proposal.get('number')}"
+                ),
+                summary=str(proposal.get("summary") or proposal.get("message", "")),
                 files=staged,
             )
     except Exception as exc:
@@ -849,7 +864,7 @@ def _tool_arguments(interruption: agents.ToolApprovalItem) -> str:
     return str(getattr(raw, "arguments", ""))
 
 
-def _approval_summary(*, tool_arguments: str) -> str:
+def _approval_summary(*, tool_name: str, tool_arguments: str) -> str:
     """
     Render the paused arguments as readable mrkdwn for the approver — the
     target and business justification of an access request, not raw JSON — so
@@ -863,14 +878,17 @@ def _approval_summary(*, tool_arguments: str) -> str:
     if isinstance(args, list):
         return "\n\n".join(
             f"*Tool:* `{entry.get('tool', 'tool')}`\n"
-            + _arguments_block(str(entry.get("arguments", "")))
+            + _arguments_block(
+                tool_name=str(entry.get("tool", "")),
+                tool_arguments=str(entry.get("arguments", "")),
+            )
             for entry in args
             if isinstance(entry, dict)
         )
-    return _arguments_block(tool_arguments)
+    return _arguments_block(tool_name=tool_name, tool_arguments=tool_arguments)
 
 
-def _arguments_block(tool_arguments: str) -> str:
+def _arguments_block(*, tool_name: str, tool_arguments: str) -> str:
     """
     Render one tool's argument string: a pull request proposal as its
     edits, labeled access-request fields when the args are the access shape,
@@ -878,7 +896,9 @@ def _arguments_block(tool_arguments: str) -> str:
     """
     proposal = changes.proposal_arguments(tool_arguments)
     if proposal is not None:
-        return changes.render_proposal(proposal)
+        # A revision is the tool that revises — never a call that merely
+        # carries a number: the card must say what approving really does.
+        return changes.render_proposal(proposal, revision=tool_name == changes.UPDATE_PULL_REQUEST)
     try:
         args = json.loads(tool_arguments)
     except (json.JSONDecodeError, TypeError):

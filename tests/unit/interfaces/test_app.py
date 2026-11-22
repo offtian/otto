@@ -641,13 +641,59 @@ def _pull_request_payload(
     payload = {
         "action": "closed",
         "pull_request": {
+            "number": 7,
             "html_url": PULL_REQUEST_URL,
             "title": "Raise the AI team's CPU quota",
             "body": f"Requested for the Q4 training runs.\n{address}",
             "merged": True,
         },
+        "repository": {"full_name": "acme/infra-live"},
     }
     return json.dumps(payload | overrides).encode()
+
+
+def _workflow_run_payload(**run_overrides) -> bytes:
+    """
+    A GitHub webhook body about a workflow run that finished without passing
+    on the commit of pull request 7. It says nothing of whose pull request
+    that is — the description is not in it.
+    """
+    run = {
+        "name": "terraform",
+        "html_url": "https://github.com/acme/infra-live/actions/runs/1",
+        "conclusion": "failure",
+        "head_sha": "head-sha",
+        "pull_requests": [{"number": 7}],
+    }
+    payload = {
+        "action": "completed",
+        "workflow_run": run | run_overrides,
+        "repository": {"full_name": "acme/infra-live"},
+    }
+    return json.dumps(payload).encode()
+
+
+def _open_pull_request(*, signed_with: str | None = GITHUB_WEBHOOK_SECRET) -> dict:
+    """
+    Pull request 7 as the repository host reports it: open and, by default,
+    carrying the return address Otto signs.
+    """
+    address = (
+        changes.return_address(origin=PULL_REQUEST_THREAD, requester_id="U_REQ", key=signed_with)
+        if signed_with
+        else ""
+    )
+    return {
+        "number": 7,
+        "url": PULL_REQUEST_URL,
+        "title": "Raise the AI team's CPU quota",
+        "body": f"Requested for the Q4 training runs.\n{address}",
+        "branch": "otto/raise-quota",
+        "head": "head-sha",
+        "base": "main",
+        "open": True,
+        "same_repo": True,
+    }
 
 
 def _github_headers(body: bytes, *, event: str = "pull_request", delivery: str = "d-1") -> dict:
@@ -716,8 +762,12 @@ class TestGitHubWebhook:
             headers=_github_headers(body, event="pull_request_review", delivery="d-review"),
         )
 
-        # Then the conversation's request carries the reviewer's words
-        assert "Name the team lead." in handler.await_args.kwargs["request"].text
+        # Then the conversation's request carries the reviewer's words, and
+        # says which pull request can be revised to answer them
+        text = handler.await_args.kwargs["request"].text
+        assert "Name the team lead." in text
+        assert "number 7 in acme/infra-live" in text
+        assert "update_pull_request" in text
 
     @pytest.mark.parametrize("signed_with", [None, "somebody-elses-key"])
     def test_ignores_a_pull_request_that_does_not_carry_ottos_return_address(
@@ -891,3 +941,92 @@ class TestRateLimiter:
         # When a different user makes their first request
         # Then it is allowed — the cap is per user
         assert limiter.allow("U_two", now=self._NOW) is True
+
+
+class TestGitHubCheckFailures:
+    @staticmethod
+    def _post(http, body: bytes, *, delivery: str):
+        return http.post(
+            "/github/webhook",
+            content=body,
+            headers=_github_headers(body, event="workflow_run", delivery=delivery),
+        )
+
+    def test_reports_a_failed_check_to_the_conversation_that_asked_for_the_pull_request(
+        self, client, monkeypatch
+    ):
+        # Given a handler spy, and a repository host that knows pull request 7
+        # as one Otto opened
+        http, cfg = client
+        cfg.repo_host = mock.AsyncMock()
+        cfg.repo_host.get_pull_request.return_value = _open_pull_request()
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+
+        # When GitHub reports a workflow run that failed on its commit
+        response = self._post(http, _workflow_run_payload(), delivery="d-failed")
+
+        # Then the pull request is read to find whose it is, and that
+        # conversation gets a request naming the check and the pull request
+        request = handler.await_args.kwargs["request"]
+        assert response.status_code == 200
+        cfg.repo_host.get_pull_request.assert_awaited_once_with(repo="acme/infra-live", number=7)
+        assert (request.id, request.user_id, request.origin) == (
+            "github:d-failed",
+            "U_REQ",
+            PULL_REQUEST_THREAD,
+        )
+        assert "has a failing check" in request.text
+        assert "terraform" in request.text
+        assert "number 7 in acme/infra-live" in request.text
+
+    def test_reports_a_failing_commit_once_however_many_of_its_checks_fail(
+        self, client, monkeypatch
+    ):
+        # Given a handler spy, and a pull request of Otto's
+        http, cfg = client
+        cfg.repo_host = mock.AsyncMock()
+        cfg.repo_host.get_pull_request.return_value = _open_pull_request()
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+
+        # When two different workflows fail on the same commit
+        self._post(http, _workflow_run_payload(name="terraform"), delivery="d-first")
+        self._post(http, _workflow_run_payload(name="lint"), delivery="d-second")
+
+        # Then the conversation hears about that commit once
+        assert handler.await_count == 1
+
+    def test_ignores_a_failed_check_on_a_pull_request_that_is_not_ottos(self, client, monkeypatch):
+        # Given a handler spy, and a pull request with no return address
+        http, cfg = client
+        cfg.repo_host = mock.AsyncMock()
+        cfg.repo_host.get_pull_request.return_value = _open_pull_request(signed_with=None)
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+
+        # When GitHub reports a failed run on its commit
+        response = self._post(http, _workflow_run_payload(), delivery="d-not-ours")
+
+        # Then it is acked and nothing is said anywhere
+        assert response.status_code == 200
+        assert handler.await_count == 0
+
+    @pytest.mark.parametrize(
+        "run",
+        [{"conclusion": "success"}, {"pull_requests": []}],
+        ids=["passed", "no pull request"],
+    )
+    def test_looks_nothing_up_for_a_run_that_is_no_news(self, client, monkeypatch, run):
+        # Given a handler spy and a repository host
+        http, cfg = client
+        cfg.repo_host = mock.AsyncMock()
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+
+        # When GitHub reports a run that passed, or one on no pull request
+        self._post(http, _workflow_run_payload(**run), delivery="d-no-news")
+
+        # Then nothing is read from the repository and nothing is said
+        assert cfg.repo_host.get_pull_request.await_count == 0
+        assert handler.await_count == 0

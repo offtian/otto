@@ -295,10 +295,32 @@ class JiraWebhook(_Payload):
 
 
 class _GitHubPullRequest(_Payload):
+    number: int = 0
     html_url: str = ""
     title: str = ""
     body: str | None = None
     merged: bool = False
+
+
+class _GitHubRepository(_Payload):
+    full_name: str = ""
+
+
+class _GitHubRunPullRequest(_Payload):
+    number: int = 0
+
+
+class _GitHubWorkflowRun(_Payload):
+    name: str | None = None
+    html_url: str = ""
+    conclusion: str | None = None
+    head_sha: str = ""
+    # The pull requests the run's commit belongs to. Empty for a fork's.
+    pull_requests: list[_GitHubRunPullRequest] = pydantic.Field(default_factory=list)
+
+
+# A workflow run that ended in one of these did not pass.
+_FAILED_CONCLUSIONS = frozenset({"failure", "timed_out"})
 
 
 class _GitHubReview(_Payload):
@@ -310,6 +332,8 @@ class GitHubWebhook(_Payload):
     action: str = ""
     pull_request: _GitHubPullRequest | None = None
     review: _GitHubReview | None = None
+    repository: _GitHubRepository | None = None
+    workflow_run: _GitHubWorkflowRun | None = None
 
     def to_pull_request_event(
         self, *, event: str, signing_key: str
@@ -346,4 +370,32 @@ class GitHubWebhook(_Payload):
             origin=origin,
             requester_id=requester_id,
             detail=detail,
+            repo=self.repository.full_name if self.repository else "",
+            number=pull_request.number,
+        )
+
+    def to_check_failure(self, *, event: str) -> changes.CheckFailure | None:
+        """
+        Map a workflow run that finished without passing to the
+        ``CheckFailure`` on the pull request its commit belongs to. None for
+        every other event, and for a run on no pull request. The payload
+        does not carry the pull request's description, so whose pull request
+        it is has still to be looked up.
+
+        :param event: the ``X-GitHub-Event`` header.
+        """
+        run = self.workflow_run
+        if event != "workflow_run" or self.action != "completed" or run is None:
+            return None
+        if run.conclusion not in _FAILED_CONCLUSIONS or self.repository is None:
+            return None
+        if not run.pull_requests:
+            return None
+        return changes.CheckFailure(
+            repo=self.repository.full_name,
+            # A branch Otto pushed belongs to one pull request.
+            number=run.pull_requests[0].number,
+            name=run.name or "a workflow",
+            url=run.html_url,
+            commit=run.head_sha,
         )

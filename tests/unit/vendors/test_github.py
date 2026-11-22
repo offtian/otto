@@ -162,3 +162,124 @@ class TestOpenPullRequest:
                 },
             ),
         ]
+
+
+def _pull_request_payload(**overrides) -> dict:
+    return {
+        "number": 7,
+        "html_url": "https://github.com/acme/infra-live/pull/7",
+        "title": "Raise the AI team's CPU quota",
+        "body": None,
+        "state": "open",
+        "head": {
+            "ref": "otto/raise-quota",
+            "sha": "head-sha",
+            "repo": {"full_name": "acme/infra-live"},
+        },
+        "base": {"ref": "main", "repo": {"full_name": "acme/infra-live"}},
+    } | overrides
+
+
+class TestGetPullRequest:
+    async def test_returns_the_fields_the_port_names(self):
+        # Given an open pull request from a branch of the same repository
+        host = _host(lambda request: httpx.Response(200, json=_pull_request_payload()))
+
+        # When it is read
+        fields = await host.get_pull_request(repo="acme/infra-live", number=7)
+
+        # Then its fields come back under the port's names, an absent
+        # description as an empty one
+        assert fields == {
+            "number": 7,
+            "url": "https://github.com/acme/infra-live/pull/7",
+            "title": "Raise the AI team's CPU quota",
+            "body": "",
+            "branch": "otto/raise-quota",
+            "head": "head-sha",
+            "base": "main",
+            "open": True,
+            "same_repo": True,
+        }
+
+    async def test_tells_a_forks_branch_and_a_closed_pull_request_apart(self):
+        # Given a closed pull request whose fork has since been deleted
+        payload = _pull_request_payload(
+            state="closed", head={"ref": "patch-1", "sha": "fork-sha", "repo": None}
+        )
+        host = _host(lambda request: httpx.Response(200, json=payload))
+
+        # When it is read
+        fields = await host.get_pull_request(repo="acme/infra-live", number=7)
+
+        # Then it is neither open nor on a branch of this repository
+        assert (fields["open"], fields["same_repo"]) == (False, False)
+
+    async def test_returns_none_when_there_is_no_such_pull_request(self):
+        # Given a repository without that pull request
+        # When it is read
+        fields = await _host(lambda request: httpx.Response(404, json={})).get_pull_request(
+            repo="acme/infra-live", number=8
+        )
+
+        # Then there is nothing — not an error
+        assert fields is None
+
+
+class TestPushCommit:
+    async def test_commits_on_the_given_parent_and_moves_the_branch_without_force(self):
+        # Given a branch whose commit is known
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content) if request.content else None
+            calls.append((request.method, request.url.path, payload))
+            answers = {
+                "/repos/acme/infra-live/git/commits/head-sha": {"tree": {"sha": "base-tree"}},
+                "/repos/acme/infra-live/git/trees": {"sha": "new-tree"},
+                "/repos/acme/infra-live/git/commits": {"sha": "new-commit"},
+                "/repos/acme/infra-live/git/refs/heads/otto/raise-quota": {
+                    "ref": "refs/heads/otto/raise-quota"
+                },
+            }
+            return httpx.Response(200, json=answers[request.url.path])
+
+        # When a commit is pushed on top of it
+        await _host(handler).push_commit(
+            repo="acme/infra-live",
+            branch="otto/raise-quota",
+            parent="head-sha",
+            message="Name the team lead",
+            files={"coder/quotas.tfvars": "workspace_quotas = {}\n"},
+        )
+
+        # Then the commit's parent is that commit, and the branch is moved to
+        # it without force — so a branch that had moved on would refuse
+        writes = [(method, path, payload) for method, path, payload in calls if method != "GET"]
+        assert writes == [
+            (
+                "POST",
+                "/repos/acme/infra-live/git/trees",
+                {
+                    "base_tree": "base-tree",
+                    "tree": [
+                        {
+                            "path": "coder/quotas.tfvars",
+                            "mode": "100644",
+                            "type": "blob",
+                            "content": "workspace_quotas = {}\n",
+                        }
+                    ],
+                },
+            ),
+            (
+                "POST",
+                "/repos/acme/infra-live/git/commits",
+                {"message": "Name the team lead", "tree": "new-tree", "parents": ["head-sha"]},
+            ),
+            (
+                "PATCH",
+                "/repos/acme/infra-live/git/refs/heads/otto/raise-quota",
+                {"sha": "new-commit", "force": False},
+            ),
+        ]

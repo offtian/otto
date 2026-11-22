@@ -86,11 +86,12 @@ def mount(
     returns an agent with the same tools and instructions.
 
     The agent must be a top-level one: the repository tools include the
-    gated ``open_pull_request``, which a nested agent could never get
-    approved.
+    gated ``open_pull_request`` and ``update_pull_request``, which a nested
+    agent could never get approved.
 
     :param signing_key: signs the return address on each pull request the
-        agent opens; empty = they carry none.
+        agent opens; empty = they carry none, and the tools for revising a
+        pull request are not mounted.
     :raises ValueError: if a specialist mounts an approval-gated tool.
     """
     tools = list(agent.tools)
@@ -108,5 +109,5 @@ def mount(
                 repos=catalog.repos, host=repo_host, signing_key=signing_key
             )
         )
-        instructions += changes.guidance(catalog.repos)
+        instructions += changes.guidance(catalog.repos, revisions=bool(signing_key))
     return agent.clone(tools=tools, instructions=instructions)
