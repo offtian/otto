@@ -159,10 +159,12 @@ class Settings(BaseSettings):
     github_api_url: str = "https://api.github.com"
     local_repos_dir: str = "fixtures/repos"
     # Shared secret of the repository webhook (POST /github/webhook, events:
-    # pull requests and pull request reviews). With it set, each pull request
-    # Otto opens carries a signed return address, and its merge, closure or a
-    # request for changes is reported back to the conversation that asked.
-    # Empty = the webhook rejects everything and pull requests carry none.
+    # pull requests, pull request reviews and workflow runs). With it set,
+    # each pull request Otto opens carries a signed return address; its merge,
+    # closure, a request for changes or a failed check is reported back to
+    # the conversation that asked, and Otto can revise it there. Empty = the
+    # webhook rejects everything, pull requests carry no address, and the
+    # tools for revising one are not mounted.
     github_webhook_secret: str = ""
 
     # The change reviewer: a model, served by the same gateway as llm_model,
