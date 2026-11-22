@@ -132,6 +132,13 @@ otto-off:
 otto-on:
     docker compose exec -T postgres psql -U postgres -d otto -c "INSERT INTO runtime_flags (name, value) VALUES ('otto_enabled', 'true') ON CONFLICT (name) DO UPDATE SET value = 'true'"
 
+# Requests still in flight, replies not yet delivered (or given up on),
+# scheduled follow-ups, and approvals awaiting a decision — ids, states and
+# times only, never conversation text.
+# List what is waiting or stuck right now
+waiting:
+    docker compose exec -T postgres psql -U postgres -d otto -c "SELECT 'request in flight' AS what, id, received_at AS since FROM inbound_requests UNION ALL SELECT 'reply ' || status, idempotency_key, next_attempt_at FROM outbox WHERE status <> 'sent' UNION ALL SELECT 'follow-up', id::text, due_at FROM follow_ups WHERE status = 'pending' UNION ALL SELECT 'approval', id, created_at FROM approvals WHERE status = 'pending' ORDER BY since"
+
 # Purge dev-chat sessions idle longer than DAYS days (C3 — session PII);
 # chats with a pending approval are spared, messages cascade with the session.
 purge-chats DAYS="30":
