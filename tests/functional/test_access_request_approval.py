@@ -179,6 +179,7 @@ def wire(monkeypatch):
         intent_classifier=None,
         access_agent=None,
         memory=None,
+        case_distiller=None,
         **settings_overrides,
     ):
         gateway = FakeSlackGateway()
@@ -202,6 +203,7 @@ def wire(monkeypatch):
             access_agent=access_agent,
             intent_classifier=intent_classifier,
             memory=memory,
+            case_distiller=case_distiller,
         )
         monkeypatch.setattr(config, "get_config", lambda: cfg)
         return cfg, gateway, model
@@ -501,6 +503,41 @@ class TestKnowledgeAnswerFeedback:
         # Then the resolved transcript landed in long-term memory
         assert len(memory.ingested) == 1
         assert "Restart the client" in memory.ingested[0]
+
+    async def test_a_yes_vote_remembers_the_distilled_case_not_the_transcript(self, wire):
+        # Given a memory store fed by a case distiller, and a resolved thread
+        memory = FakeMemoryStore()
+        distiller = mock.AsyncMock()
+        distiller.distill.return_value = "Symptom: VPN drops. Fix: restart the client."
+        _cfg, gateway, _ = wire(ScriptedModel([]), memory=memory, case_distiller=distiller)
+        gateway.thread = [
+            ("U_REQ", "My VPN fails on hotel wifi"),
+            ("otto", "Restart the client and rejoin the network."),
+            ("U_REQ", "That fixed it, thanks!"),
+        ]
+
+        # When the requester votes that the answer helped
+        await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
+
+        # Then memory holds the case note, and nothing of who said what
+        (remembered,) = memory.ingested
+        assert "Symptom: VPN drops. Fix: restart the client." in remembered
+        assert "U_REQ" not in remembered
+
+    async def test_a_conversation_with_nothing_reusable_is_not_remembered(self, wire):
+        # Given a case distiller that finds nothing worth keeping
+        memory = FakeMemoryStore()
+        distiller = mock.AsyncMock()
+        distiller.distill.return_value = None
+        _cfg, gateway, _ = wire(ScriptedModel([]), memory=memory, case_distiller=distiller)
+        gateway.thread = [("U_REQ", "thanks!"), ("otto", "You're welcome.")]
+
+        # When the requester votes that the answer helped
+        await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
+
+        # Then nothing is remembered, and the vote is still confirmed
+        assert memory.ingested == []
+        assert any(channel == "D1" and "helped" in text for channel, _, text in gateway.messages)
 
     async def test_a_memory_outage_never_fails_the_vote(self, wire):
         # Given a memory store whose backend is down

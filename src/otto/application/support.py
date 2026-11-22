@@ -634,10 +634,12 @@ async def _resume_run(
 
 async def _remember_resolution(*, origin: entities.Origin, cfg: config.Configuration) -> None:
     """
-    Ingest a just-resolved conversation into long-term memory (Phase 3) —
-    the next similar issue gets "we fixed this before" context. Votes ride
-    only Slack answers, so only Slack threads land here; best-effort by
-    design, any failure is logged and swallowed.
+    Remember a just-resolved conversation in long-term memory (Phase 3) —
+    the next similar issue gets "we fixed this before" context. With a case
+    distiller wired, what is remembered is its consolidated case note, never
+    the transcript, and a conversation it finds nothing reusable in is not
+    remembered at all. Votes ride only Slack answers, so only Slack threads
+    land here; best-effort by design, any failure is logged and swallowed.
     """
     if cfg.memory is None or not isinstance(origin, entities.SlackThread):
         return
@@ -648,9 +650,16 @@ async def _remember_resolution(*, origin: entities.Origin, cfg: config.Configura
             limit=cfg.settings.thread_history_limit,
         )
         transcript = "\n".join(f"{author}: {text}" for author, text in history)
-        await cfg.memory.ingest(
-            text=f"Resolved support conversation (requester confirmed):\n{transcript}"
-        )
+        remembered = f"Resolved support conversation (requester confirmed):\n{transcript}"
+        if cfg.case_distiller is not None:
+            note = await cfg.case_distiller.distill(transcript=transcript)
+            if note is None:
+                logs.log_event(
+                    "resolution_not_remembered", params={"origin": entities.origin_ref(origin)}
+                )
+                return
+            remembered = f"Resolved support case (requester confirmed):\n{note}"
+        await cfg.memory.ingest(text=remembered)
         logs.log_event("resolution_remembered", params={"origin": entities.origin_ref(origin)})
     except Exception as exc:
         logs.log_exception(

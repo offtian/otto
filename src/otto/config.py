@@ -110,11 +110,15 @@ class Configuration(pydantic.BaseModel):
     # Long-term memory (Cognee) — None = disabled; the search_memory tool
     # and the resolution-ingest hook both degrade to no-ops.
     memory: pydantic.SkipValidation[support_memory.MemoryStore | None] = None
+    # Consolidation: what of a resolved conversation gets remembered. Wired
+    # with memory; None = the conversation is remembered as it stands.
+    case_distiller: pydantic.SkipValidation[support_memory.CaseDistiller | None] = None
 
     def load_memory(self) -> None:
         """
-        Wire the Cognee memory store when enabled — the one deliberately
-        lazy wiring stage: building it imports the heavy cognee package.
+        Wire the Cognee memory store and the case distiller that feeds it
+        when enabled — the one deliberately lazy wiring stage: building the
+        store imports the heavy cognee package.
         """
         if not self.settings.memory_enabled:
             return
@@ -126,6 +130,11 @@ class Configuration(pydantic.BaseModel):
             embedding_model=self.settings.memory_embedding_model,
             embedding_dimensions=self.settings.memory_embedding_dimensions,
             dataset=self.settings.memory_dataset,
+        )
+        self.case_distiller = llm.build_case_distiller(
+            base_url=self.settings.llm_base_url,
+            api_key=self.settings.llm_api_key,
+            model_name=self.settings.llm_model,
         )
 
     async def load_agents(self) -> None:

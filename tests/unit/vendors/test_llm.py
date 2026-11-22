@@ -136,3 +136,54 @@ class TestLLMIntentClassifier:
         # When a request is classified
         # Then it degrades to an empty reading rather than guessing
         assert await classifier.classify(text="I need access") == llm.IntentReading()
+
+
+def _distiller(reply: str | None = None, error: Exception | None = None) -> llm.LLMCaseDistiller:
+    client = mock.AsyncMock()
+    if error is not None:
+        client.chat.completions.create.side_effect = error
+    else:
+        response = mock.Mock()
+        response.choices = [mock.Mock(message=mock.Mock(content=reply))]
+        client.chat.completions.create.return_value = response
+    return llm.LLMCaseDistiller(client=client, model_name="test-model")
+
+
+class TestLLMCaseDistiller:
+    TRANSCRIPT = "U_REQ: VPN drops on hotel wifi\notto: Restart the client.\nU_REQ: fixed, thanks"
+
+    async def test_returns_the_case_note_the_model_wrote(self):
+        # Given a model reply that keeps the case, with a note
+        distiller = _distiller(
+            reply='{"keep": true, "note": " Symptom: VPN drops. Fix: restart the client. "}'
+        )
+
+        # When a resolved conversation is distilled
+        note = await distiller.distill(transcript=self.TRANSCRIPT)
+
+        # Then the trimmed note comes back
+        assert note == "Symptom: VPN drops. Fix: restart the client."
+
+    async def test_returns_none_when_the_model_finds_nothing_reusable(self):
+        # Given a model reply that declines to keep the case
+        distiller = _distiller(reply='{"keep": false, "note": ""}')
+
+        # When a resolved conversation is distilled
+        # Then there is nothing to remember
+        assert await distiller.distill(transcript=self.TRANSCRIPT) is None
+
+    async def test_fails_closed_on_a_model_error(self):
+        # Given a gateway error during distillation
+        distiller = _distiller(error=RuntimeError("gateway down"))
+
+        # When a resolved conversation is distilled
+        # Then nothing is remembered — never the unvetted transcript
+        assert await distiller.distill(transcript=self.TRANSCRIPT) is None
+
+    async def test_fails_closed_on_a_reply_that_is_not_the_asked_json(self):
+        # Given a model reply that ignored the JSON format instruction
+        distiller = _distiller(reply="Symptom: VPN drops. Fix: restart the client.")
+
+        # When a resolved conversation is distilled
+        # Then nothing is remembered
+        assert await distiller.distill(transcript=self.TRANSCRIPT) is None
