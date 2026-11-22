@@ -56,6 +56,12 @@ class TestArguments:
         assert ("--entrypoint", "sh") in _pairs(arguments)
         assert arguments[-3:] == ["hashicorp/terraform:1.9", "-c", "terraform fmt -check"]
 
+    def test_keeps_an_image_download_out_of_the_output(self):
+        # Given an image that may not have been downloaded yet
+        # When the docker arguments are built
+        # Then docker is told to keep the download's progress to itself
+        assert "--quiet" in _arguments()
+
     def test_gives_the_network_only_when_asked(self):
         # Given a repository whose checks declare that they need the network
         # When the docker arguments are built

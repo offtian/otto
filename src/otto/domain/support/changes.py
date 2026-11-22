@@ -715,11 +715,13 @@ _GUIDANCE = """\
 {repos}
   For a provisioning or configuration request they cover, read the relevant
   files first, call preview_change until your edits apply cleanly, then call
-  open_pull_request. It always needs a human approval — tell the user it was
-  sent for approval and never promise the outcome. A pull request exists
-  only when open_pull_request returned its address: never state that you
-  opened or will open one as text alone. Collect what the change needs from
-  the user — never invent a name, a size or an owner.
+  open_pull_request. The call is the proposal: make it instead of writing a
+  reply, and do not announce it. It always needs a human approval, and the
+  requester is told automatically that it is waiting for one — you speak
+  again once the approver has decided. A pull request exists only when
+  open_pull_request returned its address: never state that you opened, sent
+  or will open one as text alone. Never promise the outcome. Collect what
+  the change needs from the user — never invent a name, a size or an owner.
 """
 
 _REVISION_GUIDANCE = """\

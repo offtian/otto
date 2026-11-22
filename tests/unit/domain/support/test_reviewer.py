@@ -154,3 +154,37 @@ class TestAgentChangeReviewer:
             findings=("The change does not name the team lead.",),
             reviewer="any-model",
         )
+
+    async def test_asks_once_more_when_the_answer_carries_no_verdict(self):
+        # Given a reviewer model that first answers with nothing at all, then
+        # states its verdict
+        model = ScriptedModel([[_text("")], [_text("VERDICT: approve")]])
+        change_reviewer = reviewer.AgentChangeReviewer(
+            model=model, model_name="any-model", host=FakeRepoHost()
+        )
+
+        # When it reviews a staged change
+        review = await change_reviewer.review(
+            profile=INFRA, title="Raise the AI team's CPU quota", summary="", files=STAGED
+        )
+
+        # Then the second answer is the review
+        assert review.approves
+        assert len(model.inputs) == 2
+
+    async def test_gives_up_after_a_second_answer_without_a_verdict(self):
+        # Given a reviewer model that never states a verdict
+        model = ScriptedModel(
+            [[_text("")], [_text("Looks fine to me!")], [_text("VERDICT: approve")]]
+        )
+        change_reviewer = reviewer.AgentChangeReviewer(
+            model=model, model_name="any-model", host=FakeRepoHost()
+        )
+
+        # When it reviews a staged change
+        # Then that is an error after two answers, not a third question
+        with pytest.raises(ValueError, match="no verdict"):
+            await change_reviewer.review(
+                profile=INFRA, title="Raise the AI team's CPU quota", summary="", files=STAGED
+            )
+        assert len(model.inputs) == 2

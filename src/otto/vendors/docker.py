@@ -52,6 +52,9 @@ def arguments(
     return [
         "run",
         "--rm",
+        # An image that is not local yet is downloaded first, and without
+        # this the download's progress is the start of the check's output.
+        "--quiet",
         "--name",
         name,
         "--network",

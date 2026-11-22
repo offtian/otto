@@ -72,7 +72,7 @@ class AgentChangeReviewer:
         """
         Return the reviewer's opinion on the staged change.
 
-        :raises ValueError: if the model's answer carries no verdict.
+        :raises ValueError: if the model's answer carries no verdict, twice.
         :raises agents.exceptions.AgentsException: if the run fails or does
             not finish within its turns.
         """
@@ -84,11 +84,17 @@ class AgentChangeReviewer:
                 profiles={profile.name: profile}, host=self.host
             ).read_only_tools(),
         )
-        result = await agents.Runner.run(
-            reviewer,
-            _request(profile=profile, title=title, summary=summary, files=files),
-            max_turns=_MAX_TURNS,
-        )
+        request = _request(profile=profile, title=title, summary=summary, files=files)
+        try:
+            return await self._opinion(reviewer, request)
+        except ValueError:
+            # A model now and then answers with nothing at all (a local
+            # thinking model did, one review in eight). One more try before
+            # the change goes to the approver unreviewed.
+            return await self._opinion(reviewer, request)
+
+    async def _opinion(self, reviewer: agents.Agent[None], request: str) -> changes.Review:
+        result = await agents.Runner.run(reviewer, request, max_turns=_MAX_TURNS)
         return parse_review(str(result.final_output), reviewer=self.model_name)
 
 

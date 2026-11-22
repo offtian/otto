@@ -14,8 +14,10 @@ services:
 
   postgres:
     # Postgres 17 with the pgvector extension, which memory's search by
-    # meaning needs (migration 0017). Same data directory as postgres:17.
-    image: pgvector/pgvector:pg17
+    # meaning needs (migration 0017). The -trixie tag is built on the same
+    # Debian as postgres:17, so a data directory that image created opens
+    # without a collation version mismatch; plain pg17 is the older bookworm.
+    image: pgvector/pgvector:pg17-trixie
     environment:
       POSTGRES_DB: otto
       POSTGRES_HOST_AUTH_METHOD: trust # localdev only
