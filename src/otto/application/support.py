@@ -280,7 +280,7 @@ async def record_feedback(*, helpful: bool, origin: entities.Origin, voter_id: s
         # After the reply on purpose: this whole use-case already runs as a
         # background task, so a slow cognify never delays the confirmation —
         # and a memory outage must never fail a recorded resolution.
-        await _remember_resolution(origin=origin, cfg=cfg)
+        await _remember_resolution(origin=origin, requester_id=voter_id, cfg=cfg)
         return
     await cfg.triage.escalate(
         subject="Unresolved support answer",
@@ -407,6 +407,9 @@ async def sweep_approvals(*, now: datetime) -> None:
         if cfg.memory is not None
         else 0
     )
+    # Who had which case is kept for much less time than the case notes.
+    if cfg.case_history is not None:
+        await cfg.case_history.purge(cutoff=now - timedelta(days=s.memory_history_days))
     logs.log_event(
         "approval_sweep",
         params={
@@ -747,7 +750,9 @@ async def _resume_run(
     return await flows.SUPPORT.run(state, entry=entry)
 
 
-async def _remember_resolution(*, origin: entities.Origin, cfg: config.Configuration) -> None:
+async def _remember_resolution(
+    *, origin: entities.Origin, requester_id: str, cfg: config.Configuration
+) -> None:
     """
     Consolidate a just-resolved conversation into long-term memory — the
     next similar issue gets "we fixed this before" context. The conversation
@@ -755,8 +760,11 @@ async def _remember_resolution(*, origin: entities.Origin, cfg: config.Configura
     note for the same symptom and fix, that note is confirmed (seen once
     more, now) instead of gaining a copy; and a conversation with nothing
     reusable in it is not remembered at all. The transcript itself is never
-    kept. Votes ride only Slack answers, so only Slack threads land here;
-    best-effort by design, any failure is logged and swallowed.
+    kept. With requester history wired, the note the case was filed under is
+    also recorded against ``requester_id`` — whoever confirmed the
+    resolution — so a repeat of theirs is recognised. Votes ride only Slack
+    answers, so only Slack threads land here; best-effort by design, any
+    failure is logged and swallowed.
     """
     if (
         cfg.memory is None
@@ -780,15 +788,17 @@ async def _remember_resolution(*, origin: entities.Origin, cfg: config.Configura
         )
         if case is None:
             outcome = "nothing_to_keep"
-        elif case.restates is not None:
-            # ponytail: every vote counts, so three helpful answers in one
-            # thread are three sightings. Key sightings by conversation if
-            # the count ever decides anything.
-            await cfg.memory.confirm(case.restates)
-            outcome = "confirmed"
         else:
-            await cfg.memory.remember(note=case.note)
-            outcome = "remembered"
+            if case.restates is not None:
+                # ponytail: every vote counts, so three helpful answers in one
+                # thread are three sightings. Key sightings by conversation
+                # if the count ever decides anything.
+                await cfg.memory.confirm(case.restates)
+                memory_id, outcome = case.restates, "confirmed"
+            else:
+                memory_id, outcome = await cfg.memory.remember(note=case.note), "remembered"
+            if cfg.case_history is not None:
+                await cfg.case_history.record(requester_id=requester_id, memory_id=memory_id)
         logs.log_event(
             "resolution_consolidated",
             params={"origin": entities.origin_ref(origin), "outcome": outcome},

@@ -142,6 +142,11 @@ memory:
 memory-forget ID:
     docker compose exec -T postgres psql -U postgres -d otto -c "DELETE FROM memory_notes WHERE id = {{ ID }} RETURNING id, note"
 
+# The notes stay: they say nothing about anyone. Only the record of who had them goes.
+# Delete everything remembered about one requester (their Slack user id)
+memory-forget-requester ID:
+    docker compose exec -T postgres psql -U postgres -d otto -c "DELETE FROM requester_cases WHERE requester_id = '{{ ID }}' RETURNING memory_id, happened_at"
+
 # Requests still in flight, replies not yet delivered (or given up on),
 # scheduled follow-ups, and approvals awaiting a decision — ids, states and
 # times only, never conversation text.

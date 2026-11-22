@@ -97,7 +97,9 @@ router → dispatch.accept → dispatch.handle_safely → flows.SUPPORT → deli
   consolidation on a confirmed resolution: the conversation is distilled into
   a de-identified note, or confirms one memory already holds. Notes are found
   by keyword (Postgres full-text search, no embeddings) and reach an agent —
-  through the retrieval gate or `search_memory` — framed as untrusted.
+  through the retrieval gate or `search_memory` — framed as untrusted. The one
+  record that names a person is `requester_cases` (requester id, note id,
+  timestamp): off by default, kept `MEMORY_HISTORY_DAYS`, never any text.
 - **Anything that makes Otto speak on its own** — reply retries, follow-ups,
   startup replay — checks the kill switch first.
 - **Approval-gated tools mount only on top-level agents.** Specialists and the

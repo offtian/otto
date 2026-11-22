@@ -1,12 +1,13 @@
 import pathlib
 import types
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 import agents
 
 from otto import config
 from otto.application import flows, graph
+from otto.domain.support import history as support_history
 from otto.domain.support import memory as support_memory
 from otto.vendors import llm
 
@@ -34,7 +35,24 @@ class FakeMemoryStore:
         return self.memories[:limit]
 
 
-def _wire(monkeypatch, *, intent_classifier=None, access_agent=None, memory=None):
+class FakeCaseHistory:
+    def __init__(self, cases=(), error=None):
+        self.cases = list(cases)
+        self.error = error
+        self.asked: list[tuple[str, timedelta, int]] = []
+
+    async def recent(
+        self, *, requester_id: str, window: timedelta, limit: int
+    ) -> list[support_history.PastCase]:
+        self.asked.append((requester_id, window, limit))
+        if self.error is not None:
+            raise self.error
+        return self.cases[:limit]
+
+
+def _wire(
+    monkeypatch, *, intent_classifier=None, access_agent=None, memory=None, case_history=None
+):
     """
     Stub the wired config with sentinel agents and return (cfg, run_spy)
     where run_spy replaces ``agents.Runner.run``.
@@ -44,6 +62,8 @@ def _wire(monkeypatch, *, intent_classifier=None, access_agent=None, memory=None
         access_agent=access_agent,
         intent_classifier=intent_classifier,
         memory=memory,
+        case_history=case_history,
+        settings=types.SimpleNamespace(memory_history_days=30),
     )
     monkeypatch.setattr(config, "get_config", lambda: cfg)
     run_spy = mock.AsyncMock(return_value=mock.Mock(interruptions=[]))
@@ -56,7 +76,9 @@ def _state(
 ) -> graph.State:
     # The context carries the runbook directory the agent's tools read; one
     # that does not exist means no runbook is ever hinted.
-    ctx = types.SimpleNamespace(runbooks_dir=runbooks_dir or pathlib.Path("no-runbooks-here"))
+    ctx = types.SimpleNamespace(
+        requester_id="U_REQ", runbooks_dir=runbooks_dir or pathlib.Path("no-runbooks-here")
+    )
     return {"text": text, "input": "the input", "ctx": ctx}
 
 
@@ -268,6 +290,63 @@ class TestRetrievalGate:
         assert "Past case (seen 3 times, last on 2026-11-20):" in agent_input
         assert self.PAST_CASE.note in agent_input
         assert "may not apply" in agent_input
+
+    async def test_the_requesters_own_recent_cases_come_first_and_only_once(self, monkeypatch):
+        # Given a requester who had the past case twice this month, and a
+        # memory whose keyword search finds that note and one other
+        other_case = support_memory.Memory(
+            id=8,
+            note="Symptom: wifi drops in meeting rooms. Fix: forget the network and rejoin.",
+            times_seen=1,
+            last_seen=datetime(2026, 10, 2, tzinfo=UTC),
+        )
+        history = FakeCaseHistory(
+            cases=[
+                support_history.PastCase(
+                    memory_id=self.PAST_CASE.id,
+                    note=self.PAST_CASE.note,
+                    times=2,
+                    last_at=datetime(2026, 11, 21, tzinfo=UTC),
+                )
+            ]
+        )
+        _cfg, run_spy = _wire(
+            monkeypatch,
+            intent_classifier=FakeIntentClassifier(llm.IntentReading(recall="vpn hotel wifi")),
+            memory=FakeMemoryStore(memories=[self.PAST_CASE, other_case]),
+            case_history=history,
+        )
+
+        # When the request runs through the support graph
+        await flows.SUPPORT.run(_state())
+
+        # Then the agent reads the requester's own case first, with how often
+        # they had it — asked for by their id, over the configured window —
+        # and that note is not repeated among the keyword matches
+        agent_input = run_spy.await_args.args[1]
+        own_block = agent_input.index("This requester's own recently resolved cases")
+        assert history.asked == [("U_REQ", timedelta(days=30), 3)]
+        assert "This requester had this case 2 times, last on 2026-11-21:" in agent_input
+        assert own_block < agent_input.index("Possibly relevant past cases from memory")
+        assert agent_input.count(self.PAST_CASE.note) == 1
+        assert other_case.note in agent_input
+
+    async def test_a_history_outage_leaves_the_keyword_recall_in_place(self, monkeypatch):
+        # Given a requester history whose store is down, over a working memory
+        _cfg, run_spy = _wire(
+            monkeypatch,
+            intent_classifier=FakeIntentClassifier(llm.IntentReading(recall="vpn hotel wifi")),
+            memory=FakeMemoryStore(memories=[self.PAST_CASE]),
+            case_history=FakeCaseHistory(error=RuntimeError("database down")),
+        )
+
+        # When the request runs through the support graph
+        await flows.SUPPORT.run(_state())
+
+        # Then the agent still reads what the keyword search found
+        agent_input = run_spy.await_args.args[1]
+        assert self.PAST_CASE.note in agent_input
+        assert "This requester's own" not in agent_input
 
     async def test_a_closed_gate_leaves_memory_alone(self, monkeypatch):
         # Given a reading that says memory would not help
