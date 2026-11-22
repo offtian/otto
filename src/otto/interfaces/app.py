@@ -19,7 +19,7 @@ from otto import config
 from otto.application import delivery, dispatch, killswitch, support
 from otto.data import db
 from otto.domain.support import entities
-from otto.interfaces.routers import base, jira, slack
+from otto.interfaces.routers import base, github, jira, slack
 from otto.settings import settings
 from otto.utils import logs, telemetry
 
@@ -252,4 +252,5 @@ app.state.kill_switch = killswitch.KillSwitch()
 app.state.jira_bot_account_id = None
 app.include_router(slack.router)
 app.include_router(jira.router)
+app.include_router(github.router)
 app.include_router(base.router)

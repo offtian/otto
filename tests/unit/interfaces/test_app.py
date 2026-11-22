@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 import time
 import urllib.parse
@@ -11,7 +13,7 @@ from slack_sdk.signature import SignatureVerifier
 from otto import config
 from otto.application import delivery, dispatch, killswitch, support
 from otto.domain.identity import users
-from otto.domain.support import approvals, entities
+from otto.domain.support import approvals, changes, entities
 from otto.interfaces import app as otto_app
 from otto.settings import Settings
 from otto.utils import logs
@@ -19,6 +21,7 @@ from otto.utils import logs
 
 SIGNING_SECRET = "test-signing-secret"
 JIRA_WEBHOOK_SECRET = "test-jira-webhook-secret"
+GITHUB_WEBHOOK_SECRET = "test-github-webhook-secret"
 
 
 def _signed_headers(body: bytes) -> dict[str, str]:
@@ -49,6 +52,7 @@ def client(monkeypatch):
         slack_triage_channel="C_TRIAGE",
         support_user_ids="U_SUPPORT",
         jira_webhook_secret=JIRA_WEBHOOK_SECRET,
+        github_webhook_secret=GITHUB_WEBHOOK_SECRET,
     )
     jira = mock.AsyncMock()
     jira.get_myself_account_id.return_value = "OTTO_BOT"
@@ -616,6 +620,151 @@ class TestJiraWebhook:
         assert response.status_code == 200
         assert not any(c.args[0] == "request_resolved" for c in events.call_args_list)
         assert handler.await_count == 0
+
+
+PULL_REQUEST_THREAD = entities.SlackThread(channel_id="C1", thread_ts="1.0")
+PULL_REQUEST_URL = "https://github.com/acme/infra-live/pull/7"
+
+
+def _pull_request_payload(
+    *, signed_with: str | None = GITHUB_WEBHOOK_SECRET, **overrides
+) -> bytes:
+    """
+    A GitHub webhook body about one pull request. By default its description
+    carries the return address Otto signs when it opens one.
+    """
+    address = (
+        changes.return_address(origin=PULL_REQUEST_THREAD, requester_id="U_REQ", key=signed_with)
+        if signed_with
+        else ""
+    )
+    payload = {
+        "action": "closed",
+        "pull_request": {
+            "html_url": PULL_REQUEST_URL,
+            "title": "Raise the AI team's CPU quota",
+            "body": f"Requested for the Q4 training runs.\n{address}",
+            "merged": True,
+        },
+    }
+    return json.dumps(payload | overrides).encode()
+
+
+def _github_headers(body: bytes, *, event: str = "pull_request", delivery: str = "d-1") -> dict:
+    signature = hmac.new(GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    return {
+        "x-hub-signature-256": f"sha256={signature}",
+        "x-github-event": event,
+        "x-github-delivery": delivery,
+    }
+
+
+class TestGitHubWebhook:
+    def test_rejects_a_body_that_is_not_signed_with_the_secret(self, client):
+        # Given a webhook body with a made-up signature
+        http, _ = client
+        body = _pull_request_payload()
+
+        # When it is posted
+        response = http.post(
+            "/github/webhook",
+            content=body,
+            headers=_github_headers(body) | {"x-hub-signature-256": "sha256=bogus"},
+        )
+
+        # Then it is rejected before anything is read from it
+        assert response.status_code == 401
+
+    def test_reports_a_merge_to_the_conversation_that_asked_for_it(self, client, monkeypatch):
+        # Given a handler spy, and the merge of a pull request Otto opened
+        http, _ = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+        body = _pull_request_payload()
+
+        # When GitHub delivers it
+        response = http.post(
+            "/github/webhook", content=body, headers=_github_headers(body, delivery="d-merged")
+        )
+
+        # Then the original conversation gets a request, on the requester's
+        # behalf, that says the pull request was merged
+        request = handler.await_args.kwargs["request"]
+        assert response.status_code == 200
+        assert (request.id, request.user_id, request.origin) == (
+            "github:d-merged",
+            "U_REQ",
+            PULL_REQUEST_THREAD,
+        )
+        assert PULL_REQUEST_URL in request.text
+        assert "was merged" in request.text
+
+    def test_passes_on_what_a_reviewer_asked_for(self, client, monkeypatch):
+        # Given a handler spy, and a review asking for changes
+        http, _ = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+        body = _pull_request_payload(
+            action="submitted",
+            review={"state": "changes_requested", "body": "Name the team lead."},
+        )
+
+        # When GitHub delivers it
+        http.post(
+            "/github/webhook",
+            content=body,
+            headers=_github_headers(body, event="pull_request_review", delivery="d-review"),
+        )
+
+        # Then the conversation's request carries the reviewer's words
+        assert "Name the team lead." in handler.await_args.kwargs["request"].text
+
+    @pytest.mark.parametrize("signed_with", [None, "somebody-elses-key"])
+    def test_ignores_a_pull_request_that_does_not_carry_ottos_return_address(
+        self, client, monkeypatch, signed_with
+    ):
+        # Given a handler spy, and a merged pull request whose description has
+        # no return address — or one signed by someone else
+        http, _ = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+        body = _pull_request_payload(signed_with=signed_with)
+
+        # When GitHub delivers it
+        response = http.post("/github/webhook", content=body, headers=_github_headers(body))
+
+        # Then it is acked and nothing is said anywhere
+        assert response.status_code == 200
+        assert handler.await_count == 0
+
+    def test_ignores_events_that_report_no_outcome(self, client, monkeypatch):
+        # Given a handler spy, and the opening of a pull request
+        http, _ = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+        body = _pull_request_payload(action="opened")
+
+        # When GitHub delivers it
+        http.post("/github/webhook", content=body, headers=_github_headers(body))
+
+        # Then nothing is reported — only a merge, a closure or a request for
+        # changes is news
+        assert handler.await_count == 0
+
+    def test_handles_a_redelivery_only_once(self, client, monkeypatch):
+        # Given a handler spy and the same delivery arriving twice
+        http, _ = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+        body = _pull_request_payload()
+        headers = _github_headers(body, delivery="d-twice")
+
+        # When both arrive
+        http.post("/github/webhook", content=body, headers=headers)
+        http.post("/github/webhook", content=body, headers=headers)
+
+        # Then the conversation hears once
+        assert handler.await_count == 1
 
 
 class TestStartupRecovery:

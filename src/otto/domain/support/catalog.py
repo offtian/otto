@@ -77,6 +77,7 @@ def mount(
     model: model_interface.Model,
     specialist_mcp_tools: Mapping[str, Sequence[agents.Tool]],
     repo_host: changes.RepoHost | None,
+    signing_key: str = "",
 ) -> agents.Agent[support_agent.SupportContext]:
     """
     Return ``agent`` with what the catalog declares mounted on it: one
@@ -88,6 +89,8 @@ def mount(
     gated ``open_pull_request``, which a nested agent could never get
     approved.
 
+    :param signing_key: signs the return address on each pull request the
+        agent opens; empty = they carry none.
     :raises ValueError: if a specialist mounts an approval-gated tool.
     """
     tools = list(agent.tools)
@@ -100,6 +103,10 @@ def mount(
         )
         instructions += support_specialists.GUIDANCE
     if catalog.repos and repo_host is not None:
-        tools.extend(changes.build_change_tools(repos=catalog.repos, host=repo_host))
+        tools.extend(
+            changes.build_change_tools(
+                repos=catalog.repos, host=repo_host, signing_key=signing_key
+            )
+        )
         instructions += changes.guidance(catalog.repos)
     return agent.clone(tools=tools, instructions=instructions)

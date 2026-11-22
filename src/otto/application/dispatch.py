@@ -21,7 +21,7 @@ import attrs
 
 from otto import config
 from otto.application import support
-from otto.domain.support import entities
+from otto.domain.support import changes, entities
 from otto.utils import logs
 
 
@@ -42,6 +42,30 @@ _FOLLOW_UP_PROMPT = (
     "calls for now and report the result here. If it is still not finished, say "
     "so, and schedule another follow-up only if it is worth waiting longer."
 )
+
+
+# What the agent reads when something happens to a pull request it opened.
+# The title and a reviewer's words come from the repository, so they are
+# quoted as data.
+_PULL_REQUEST_PROMPT = (
+    "[Pull request update — nobody wrote this message; the repository reported "
+    "it.] The pull request you opened for this conversation, {url} ({title!r}), "
+)
+_PULL_REQUEST_OUTCOMES = {
+    changes.MERGED: "was merged. Tell the requester it is done, briefly.",
+    changes.CLOSED: (
+        "was closed without being merged, so the change was not made. Tell the "
+        "requester, and offer to escalate to a human if they still need it."
+    ),
+    changes.CHANGES_REQUESTED: (
+        "was reviewed, and the reviewer asked for changes before it can be "
+        "merged: {detail!r}. Tell the requester what was asked. You cannot "
+        "update that pull request; if the fix is a small edit you can make, you "
+        "may propose a new one, which will need approval again."
+    ),
+}
+# The most of a reviewer's comment that is passed on to the agent.
+_DETAIL_LIMIT = 2000
 
 
 @attrs.frozen
@@ -197,6 +221,27 @@ def _conversation_lock(origin: entities.Origin) -> asyncio.Lock:
         lock = asyncio.Lock()
         _conversation_locks[key] = lock
     return lock
+
+
+def pull_request_update(
+    *, event: changes.PullRequestEvent, delivery_id: str
+) -> entities.SupportRequest:
+    """
+    Return the inbound request that tells a conversation what happened to
+    the pull request it asked for. Like a follow-up, it is a request that
+    arrives later: it runs on behalf of the original requester, and the
+    agent's reply is the update.
+
+    :param delivery_id: the host's own id for this delivery — the request id,
+        so a redelivery is the same request.
+    """
+    return entities.SupportRequest(
+        id=f"github:{delivery_id}",
+        user_id=event.requester_id,
+        text=_PULL_REQUEST_PROMPT.format(url=event.url, title=event.title)
+        + _PULL_REQUEST_OUTCOMES[event.kind].format(detail=event.detail[:_DETAIL_LIMIT]),
+        origin=event.origin,
+    )
 
 
 async def _finish(*, request_id: str) -> None:

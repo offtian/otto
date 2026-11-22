@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 
 import httpx
@@ -11,6 +13,30 @@ def _host(handler) -> github.GitHubRepoHost:
             base_url="https://api.github.test", transport=httpx.MockTransport(handler)
         )
     )
+
+
+class TestVerifyWebhook:
+    BODY = b'{"action": "closed"}'
+
+    def _signature(self, secret: str) -> str:
+        return "sha256=" + hmac.new(secret.encode(), self.BODY, hashlib.sha256).hexdigest()
+
+    def test_accepts_a_body_signed_with_the_shared_secret(self):
+        # Given a body and the signature GitHub computes for it
+        # When it is verified against the same secret
+        # Then it is accepted
+        assert github.verify_webhook(
+            secret="hook-secret", body=self.BODY, signature=self._signature("hook-secret")
+        )
+
+    def test_rejects_a_wrong_signature_and_fails_closed_without_a_secret(self):
+        # Given a signature made with another secret, and an unconfigured secret
+        # When each is verified
+        # Then neither is accepted
+        assert not github.verify_webhook(
+            secret="hook-secret", body=self.BODY, signature=self._signature("other")
+        )
+        assert not github.verify_webhook(secret="", body=self.BODY, signature=self._signature(""))
 
 
 class TestReadFile:

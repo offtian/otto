@@ -54,8 +54,12 @@ def _edit(**overrides) -> changes.FileEdit:
     return changes.FileEdit(**(RAISE_AI_CPU | overrides))
 
 
-def _tools(host) -> dict[str, object]:
-    return {tool.name: tool for tool in changes.build_change_tools(repos=[INFRA], host=host)}
+SIGNING_KEY = "test-webhook-secret"
+
+
+def _tools(host, signing_key: str = "") -> dict[str, object]:
+    tools = changes.build_change_tools(repos=[INFRA], host=host, signing_key=signing_key)
+    return {tool.name: tool for tool in tools}
 
 
 def _context(arguments: dict):
@@ -199,6 +203,49 @@ class TestRenderProposal:
         assert card.count("```") == 2
 
 
+class TestReturnAddress:
+    def _address(self, key: str = SIGNING_KEY) -> str:
+        return changes.return_address(origin=THREAD, requester_id="U_REQ", key=key)
+
+    def test_round_trips_the_conversation_and_the_requester(self):
+        # Given a description ending in a signed return address
+        body = f"Raise the quota.\n{self._address()}"
+
+        # When it is read with the same key
+        # Then the conversation and who asked come back
+        assert changes.read_return_address(body, key=SIGNING_KEY) == (THREAD, "U_REQ")
+
+    def test_refuses_an_address_signed_with_another_key(self):
+        # Given a return address somebody signed with a key of their own
+        forged = self._address(key="not-the-secret")
+
+        # When it is read with the real key
+        # Then it points nowhere — Otto cannot be aimed at a conversation
+        assert changes.read_return_address(forged, key=SIGNING_KEY) is None
+
+    def test_refuses_an_address_whose_destination_was_edited(self):
+        # Given a genuine address whose payload was swapped for another
+        # conversation's, keeping the original signature
+        elsewhere = changes.return_address(
+            origin=entities.SlackThread(channel_id="C_EXEC", thread_ts="9.9"),
+            requester_id="U_REQ",
+            key="not-the-secret",
+        )
+        genuine_signature = self._address().split(":")[2]
+        tampered = ":".join([*elsewhere.split(":")[:2], genuine_signature])
+
+        # When it is read
+        # Then the signature no longer matches what it covers
+        assert changes.read_return_address(tampered, key=SIGNING_KEY) is None
+
+    def test_reads_nothing_without_a_key_or_without_an_address(self):
+        # Given a signed address but no key, and a description with no address
+        # When each is read
+        # Then neither points anywhere
+        assert changes.read_return_address(self._address(), key="") is None
+        assert changes.read_return_address("Just a description.", key=SIGNING_KEY) is None
+
+
 class TestRenderReview:
     def test_a_clean_review_is_one_line_naming_the_reviewer(self):
         # Given a reviewer with no concerns
@@ -265,19 +312,42 @@ class TestRepoTools:
         }
 
         # When the (already approved) call runs
-        answer = await _tools(host)["open_pull_request"].on_invoke_tool(
+        answer = await _tools(host, signing_key=SIGNING_KEY)["open_pull_request"].on_invoke_tool(
             _context(arguments), json.dumps(arguments)
         )
 
         # Then one pull request is opened against the base branch with the
-        # whole edited file, naming who asked and where
+        # whole edited file, naming who asked — and carrying a signed return
+        # address back to the conversation
         (pull_request,) = host.pull_requests
         assert answer == "Pull request opened: https://github.com/acme/infra-live/pull/7"
         assert (pull_request["repo"], pull_request["base"]) == ("acme/infra-live", "main")
         assert pull_request["branch"].startswith("otto/raise-the-ai-team-s-cpu-quota-")
         assert "cpu = 32" in pull_request["files"]["coder/quotas.tfvars"]
         assert "U_REQ" in pull_request["body"]
-        assert '"thread_ts": "1.0"' in pull_request["body"]
+        assert changes.read_return_address(pull_request["body"], key=SIGNING_KEY) == (
+            THREAD,
+            "U_REQ",
+        )
+
+    async def test_a_pull_request_carries_no_return_address_without_a_signing_key(self):
+        # Given the tools with no key to sign a return address with
+        host = FakeRepoHost()
+        arguments = {
+            "repo": "acme/infra-live",
+            "title": "Raise the AI team's CPU quota",
+            "summary": "",
+            "edits": [RAISE_AI_CPU],
+        }
+
+        # When the (already approved) call runs
+        await _tools(host)["open_pull_request"].on_invoke_tool(
+            _context(arguments), json.dumps(arguments)
+        )
+
+        # Then the description points back at nothing — an unsigned address
+        # would be one anybody could write
+        assert "<!-- otto:" not in host.pull_requests[0]["body"]
 
     async def test_open_pull_request_refuses_a_change_too_long_to_have_been_seen(self):
         # Given a change far longer than an approval card can show in full

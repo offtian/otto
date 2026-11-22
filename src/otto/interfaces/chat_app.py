@@ -202,6 +202,7 @@ def _wire_runtime(database: databases.Database) -> config.Configuration:
         specialist_mcp_tools={},
         # Rebuilt here like every other loop-bound client.
         repo_host=config.build_repo_host(settings),
+        signing_key=settings.github_webhook_secret,
     )
     cfg.access_agent = support_agent.build_access_agent(model=model)
     cfg.intent_classifier = llm.build_intent_classifier(

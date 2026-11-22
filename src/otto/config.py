@@ -167,6 +167,7 @@ class Configuration(pydantic.BaseModel):
                 for name, mount in (self.specialist_mcps or {}).items()
             },
             repo_host=self.repo_host,
+            signing_key=self.settings.github_webhook_secret,
         )
         self.access_agent = support_agent.build_access_agent(
             model=self.model,

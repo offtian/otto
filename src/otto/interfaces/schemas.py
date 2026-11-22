@@ -1,6 +1,6 @@
 """
 Pydantic schemas for inbound transport payloads (Slack events, Slack
-interactions, Jira webhooks).
+interactions, Jira webhooks, GitHub webhooks).
 
 These validate the untrusted JSON at the interface boundary and carry the
 mapping to channel-neutral domain shapes (``SupportRequest``) and the small
@@ -16,7 +16,7 @@ from typing import Self
 import pydantic
 
 from otto.application import dispatch
-from otto.domain.support import entities
+from otto.domain.support import changes, entities
 from otto.vendors import slack as slack_vendor
 
 
@@ -289,3 +289,61 @@ class JiraWebhook(_Payload):
         changelog id of the transition).
         """
         return self.changelog.id if self.changelog else ""
+
+
+# --- GitHub webhooks --------------------------------------------------------
+
+
+class _GitHubPullRequest(_Payload):
+    html_url: str = ""
+    title: str = ""
+    body: str | None = None
+    merged: bool = False
+
+
+class _GitHubReview(_Payload):
+    state: str = ""
+    body: str | None = None
+
+
+class GitHubWebhook(_Payload):
+    action: str = ""
+    pull_request: _GitHubPullRequest | None = None
+    review: _GitHubReview | None = None
+
+    def to_pull_request_event(
+        self, *, event: str, signing_key: str
+    ) -> changes.PullRequestEvent | None:
+        """
+        Map what happened to a pull request Otto opened — merged, closed, or
+        changes requested — to a ``PullRequestEvent`` addressed to the
+        conversation that asked for it. None for every other event, and for
+        any pull request whose description carries no return address that
+        ``signing_key`` signed: not Otto's, or tampered with.
+
+        :param event: the ``X-GitHub-Event`` header.
+        """
+        pull_request = self.pull_request
+        if pull_request is None:
+            return None
+        kind, detail = None, ""
+        if event == "pull_request" and self.action == "closed":
+            kind = changes.MERGED if pull_request.merged else changes.CLOSED
+        elif event == "pull_request_review" and self.action == "submitted":
+            review = self.review
+            if review is not None and review.state == "changes_requested":
+                kind, detail = changes.CHANGES_REQUESTED, review.body or ""
+        if kind is None:
+            return None
+        address = changes.read_return_address(pull_request.body or "", key=signing_key)
+        if address is None:
+            return None
+        origin, requester_id = address
+        return changes.PullRequestEvent(
+            kind=kind,
+            url=pull_request.html_url,
+            title=pull_request.title,
+            origin=origin,
+            requester_id=requester_id,
+            detail=detail,
+        )
