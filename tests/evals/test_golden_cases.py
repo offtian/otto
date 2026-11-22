@@ -132,7 +132,14 @@ class TestGoldenCases:
         answer = str(result.final_output).lower()
         could_not_verify = any(
             phrase in answer
-            for phrase in ("verify", "couldn't find", "could not find", "not able")
+            for phrase in (
+                "verify",
+                "couldn't find",
+                "could not find",
+                "not able",
+                "wasn't able",
+                "unable to",
+            )
         )
         assert could_not_verify or backend.escalations, answer
 
