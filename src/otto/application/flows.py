@@ -4,7 +4,8 @@ agent node that owns it — the access specialist, or the general agent, which
 carries everything else (knowledge, runbooks, the catalogued specialists and
 repositories). Agent nodes are the only ones that may suspend (HITL) —
 ``support`` persists the suspended node name on the approval, and a human
-decision re-enters the graph exactly there.
+decision re-enters the graph exactly there. A run that uses up its turns is
+given one last call to answer from what it has, instead of failing.
 
 The classify node is also the retrieval gate: the same reading says whether
 long-term memory is worth searching for this request, and only then are past
@@ -16,6 +17,8 @@ State keys the nodes read: ``text`` (the raw request, for the classifier),
 ``ctx`` (the ``SupportContext``), and optionally ``resume`` (a paused run's
 serialized state plus the human decision).
 """
+
+import dataclasses
 
 import agents
 
@@ -31,6 +34,15 @@ GENERAL = "general"
 
 # How many recalled past cases may ride along with one request.
 _RECALL_LIMIT = 3
+
+# What an agent is told when it has used up its turns and gets one last call.
+_TURN_LIMIT_NOTE = """
+
+You have used every step you were allowed for this request and can call no
+more tools. Answer now from what you have gathered: say what you found, say
+plainly what you could not finish or verify, and offer to escalate to a
+human if the request is not resolved.
+"""
 
 
 async def _classify(state: graph.State) -> graph.NodeResult:
@@ -109,7 +121,11 @@ async def _run_agent(
         # The optional session is the dev chat's conversation store; the
         # Slack path reconstructs history into ``input`` instead.
         result = await agents.Runner.run(
-            agent, state["input"], context=state["ctx"], session=state.get("session")
+            agent,
+            state["input"],
+            context=state["ctx"],
+            session=state.get("session"),
+            error_handlers=_ERROR_HANDLERS,
         )
     else:
         # The context must be re-supplied via from_string, NOT via Runner.run:
@@ -126,10 +142,41 @@ async def _run_agent(
                 run_state.approve(interruption)
             else:
                 run_state.reject(interruption)
-        result = await agents.Runner.run(agent, run_state)
+        result = await agents.Runner.run(agent, run_state, error_handlers=_ERROR_HANDLERS)
     if result.interruptions:
         return graph.Suspend(payload=result)
     return graph.Done(output=result)
+
+
+async def _answer_at_turn_limit(
+    data: agents.RunErrorHandlerInput[support_agent.SupportContext],
+) -> agents.RunErrorHandlerResult:
+    """
+    Finish a run that used up its turns: ask the same agent once more to
+    answer from what it has gathered and say what it could not finish.
+    Without this the run raises, everything it found is thrown away, and the
+    user gets the generic apology.
+
+    The tools stay declared but none may be called (``tool_choice`` none) —
+    a history full of tool calls with no tools declared is refused by some
+    providers. If this last call fails too, the error propagates and the
+    apology is what the user gets, as before.
+    """
+    agent = data.run_data.last_agent
+    closing = agent.clone(
+        instructions=str(agent.instructions) + _TURN_LIMIT_NOTE,
+        model_settings=dataclasses.replace(agent.model_settings, tool_choice="none"),
+    )
+    result = await agents.Runner.run(
+        closing, data.run_data.history, context=data.context.context, max_turns=1
+    )
+    logs.log_event("turn_limit_reached", params={"agent": agent.name})
+    return agents.RunErrorHandlerResult(final_output=str(result.final_output))
+
+
+_ERROR_HANDLERS: agents.RunErrorHandlers[support_agent.SupportContext] = {
+    "max_turns": _answer_at_turn_limit
+}
 
 
 SUPPORT = graph.Graph(
