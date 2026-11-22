@@ -9,7 +9,7 @@ from fastapi import testclient
 from slack_sdk.signature import SignatureVerifier
 
 from otto import config
-from otto.application import killswitch, support
+from otto.application import dispatch, killswitch, support
 from otto.domain.identity import users
 from otto.domain.support import approvals, entities
 from otto.interfaces import app as otto_app
@@ -120,6 +120,24 @@ class TestSlackEvents:
 
         # Then the request is handled exactly once
         assert handler.await_count == 1
+
+    def test_ignores_a_redelivery_the_durable_inbox_already_holds(self, client, monkeypatch):
+        # Given a handler spy, and an inbox that already holds this event —
+        # accepted by another replica, or before a restart cleared the
+        # in-process dedup set
+        http, cfg = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+        cfg.inbox = mock.AsyncMock()
+        cfg.inbox.accept.return_value = False
+        body = _event_payload(event_id="Ev-in-flight")
+
+        # When Slack redelivers it
+        response = http.post("/slack/events", content=body, headers=_signed_headers(body))
+
+        # Then it is acked but not handled a second time
+        assert response.status_code == 200
+        assert handler.await_count == 0
 
     def test_ignores_bot_messages_to_prevent_reply_loops(self, client, monkeypatch):
         # Given a handler spy and an event authored by a bot
@@ -506,6 +524,21 @@ class TestJiraWebhook:
         # Then the request is handled exactly once
         assert handler.await_count == 1
 
+    def test_ignores_a_redelivery_the_durable_inbox_already_holds(self, client, monkeypatch):
+        # Given a handler spy, and an inbox that already holds this issue
+        http, cfg = client
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+        cfg.inbox = mock.AsyncMock()
+        cfg.inbox.accept.return_value = False
+
+        # When Jira redelivers it
+        response = http.post(JIRA_URL, content=_jira_issue_payload(issue_id="10004"))
+
+        # Then it is acked but not handled a second time
+        assert response.status_code == 200
+        assert handler.await_count == 0
+
     def test_kill_switch_acks_without_handling(self, client, monkeypatch):
         # Given the kill switch is off
         http, cfg = client
@@ -583,6 +616,45 @@ class TestJiraWebhook:
         assert response.status_code == 200
         assert not any(c.args[0] == "request_resolved" for c in events.call_args_list)
         assert handler.await_count == 0
+
+
+class TestStartupRecovery:
+    IN_FLIGHT = entities.SupportRequest(
+        id="Ev-in-flight",
+        user_id="U_REQ",
+        text="<@BOT> help",
+        origin=entities.SlackThread(channel_id="C1", thread_ts="1.0"),
+    )
+
+    @pytest.mark.parametrize("otto_enabled", [True, False])
+    async def test_picks_up_in_flight_requests_only_while_otto_is_enabled(
+        self, monkeypatch, otto_enabled
+    ):
+        # Given a request left in flight, and a kill switch in the given position
+        monkeypatch.setattr(
+            dispatch, "unfinished_requests", mock.AsyncMock(return_value=[self.IN_FLIGHT])
+        )
+        kill_switch = mock.AsyncMock()
+        kill_switch.enabled.return_value = otto_enabled
+
+        # When startup asks what to replay
+        unfinished = await otto_app._unfinished_requests(kill_switch)
+
+        # Then the request is picked up only if Otto may reply — a silenced
+        # Otto must not start answering again just because it restarted
+        assert unfinished == ([self.IN_FLIGHT] if otto_enabled else [])
+
+    async def test_replays_the_requests_left_in_flight(self, client, monkeypatch):
+        # Given the wired app and recovery spies
+        monkeypatch.setattr(support, "recover_approvals", mock.AsyncMock())
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+
+        # When the startup recovery runs over a request left in flight
+        await otto_app._recover_safely([self.IN_FLIGHT])
+
+        # Then the request is handled after all
+        handler.assert_awaited_once_with(request=self.IN_FLIGHT)
 
 
 class TestHealthz:

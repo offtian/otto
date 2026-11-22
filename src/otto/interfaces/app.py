@@ -16,22 +16,46 @@ import fastapi
 from agents import mcp as agents_mcp
 
 from otto import config
-from otto.application import killswitch, support
+from otto.application import dispatch, killswitch, support
 from otto.data import db
+from otto.domain.support import entities
 from otto.interfaces.routers import base, jira, slack
 from otto.settings import settings
 from otto.utils import logs, telemetry
 
 
-async def _recover_safely() -> None:
+async def _unfinished_requests(
+    kill_switch: killswitch.KillSwitch,
+) -> list[entities.SupportRequest]:
     """
-    Run the B2 startup recovery, logging instead of dying — an unobserved
-    task exception must not vanish.
+    Return the requests left in flight by a previous process, logging instead
+    of dying — a database blip must not stop the service from starting.
+    """
+    try:
+        now = datetime.now(tz=UTC)
+        # A replayed request gets answered, so it honors the kill switch like
+        # live intake does; while Otto is silenced the rows wait for the next
+        # start.
+        if await kill_switch.enabled(now=now):
+            return await dispatch.unfinished_requests(now=now)
+    except Exception as exc:
+        logs.log_exception(exc, params={"job": "request_recovery"})
+    return []
+
+
+async def _recover_safely(unfinished: list[entities.SupportRequest]) -> None:
+    """
+    Run the startup recovery — decided approvals whose run never completed
+    (B2), then the requests that were in flight when the previous process
+    died — logging instead of dying: an unobserved task exception must not
+    vanish.
     """
     try:
         await support.recover_approvals()
     except Exception as exc:
         logs.log_exception(exc, params={"job": "approval_recovery"})
+    for request in unfinished:
+        await dispatch.handle_safely(request)
 
 
 async def _sweep_loop(interval_seconds: int) -> None:
@@ -56,7 +80,10 @@ class _RecentIds:
     Bounded remember-set for event dedup (Slack retries and redeliveries).
     """
 
-    # ponytail: in-process only — move to Redis when replicas > 1 (Phase 3).
+    # ponytail: in-process only. With a database the durable inbox already
+    # refuses a redelivery of an in-flight request on every replica; one that
+    # arrives after its request finished is caught only here. At replicas > 1
+    # keep finished inbox rows as tombstones (Phase 3) — no Redis needed.
 
     def __init__(self, maxlen: int = 2048) -> None:
         self._ids: collections.OrderedDict[str, None] = collections.OrderedDict()
@@ -138,11 +165,16 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
         # After connect on purpose: wiring the agent pulls each mount's tool list
         # over its live connection (a failed mount degrades to its stub tool).
         await cfg.load_agents()
+        # Snapshot the inbox before serving: every row in it now was left by
+        # a previous process, whereas once intake starts live requests share
+        # the table and must not be replayed.
+        unfinished = await _unfinished_requests(started_app.state.kill_switch)
         # B2: execute any approval decided before a crash/restart whose run
-        # never completed — a human decision is carried out, never lost. In
-        # the background: each recovery is a full LLM run, and readiness must
-        # not wait on it (Slack retries against a closed port otherwise).
-        background_tasks = [asyncio.create_task(_recover_safely())]
+        # never completed — a human decision is carried out, never lost — and
+        # replay the snapshot. In the background: each recovery is a full LLM
+        # run, and readiness must not wait on it (Slack retries against a
+        # closed port otherwise).
+        background_tasks = [asyncio.create_task(_recover_safely(unfinished))]
         # Approval maintenance sweep (2.5): only meaningful against the durable
         # store, and the interval is a kill switch (0 = off).
         if cfg.settings.database_url and cfg.settings.approval_sweep_interval_minutes > 0:

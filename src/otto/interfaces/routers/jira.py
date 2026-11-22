@@ -65,6 +65,10 @@ async def jira_webhook(
         return fastapi.Response()
     if await _is_own_jira_actor(app_=request.app, jira=jira, actor_id=support_request.user_id):
         return fastapi.Response()
+    # Durable before the ack (see the Slack router): the inbox row is what
+    # lets a restart replay this request.
+    if not await dispatch.accept(request=support_request):
+        return fastapi.Response()
     background.add_task(dispatch.handle_safely, support_request)
     return fastapi.Response()
 

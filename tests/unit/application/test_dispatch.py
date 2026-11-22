@@ -1,0 +1,146 @@
+import asyncio
+import types
+from datetime import UTC, datetime, timedelta
+from unittest import mock
+
+import pytest
+
+from otto import config
+from otto.application import dispatch, support
+from otto.domain.support import entities
+
+
+NOW = datetime(2026, 11, 22, 9, 0, tzinfo=UTC)
+
+
+class FakeInbox:
+    """
+    In-memory stand-in for the durable inbox: the requests in flight, by id.
+    """
+
+    def __init__(self, in_flight=()):
+        self.in_flight = {request.id: request for request in in_flight}
+        self.stale_cutoffs = []
+
+    async def accept(self, request):
+        if request.id in self.in_flight:
+            return False
+        self.in_flight[request.id] = request
+        return True
+
+    async def finish(self, request_id):
+        self.in_flight.pop(request_id, None)
+
+    async def discard_stale(self, *, cutoff):
+        self.stale_cutoffs.append(cutoff)
+        return 0
+
+    async def list_unfinished(self):
+        return list(self.in_flight.values())
+
+
+def _request(request_id: str = "Ev1") -> entities.SupportRequest:
+    return entities.SupportRequest(
+        id=request_id,
+        user_id="U_REQ",
+        text="my VPN keeps dropping",
+        origin=entities.SlackThread(channel_id="C1", thread_ts="1.0"),
+    )
+
+
+def _wire(monkeypatch, *, inbox, handler=None):
+    """
+    Stub the wired config with the given inbox and return the spy that
+    replaces the support handler.
+    """
+    monkeypatch.setattr(config, "get_config", lambda: types.SimpleNamespace(inbox=inbox))
+    handler = handler or mock.AsyncMock()
+    monkeypatch.setattr(support, "handle_support_request", handler)
+    return handler
+
+
+class TestAccept:
+    async def test_refuses_a_redelivery_of_a_request_still_in_flight(self, monkeypatch):
+        # Given an inbox that already holds the request
+        request = _request()
+        _wire(monkeypatch, inbox=FakeInbox(in_flight=[request]))
+
+        # When the same request is delivered again
+        accepted = await dispatch.accept(request=request)
+
+        # Then it is refused, so it is never handled twice
+        assert accepted is False
+
+    async def test_still_handles_the_request_when_the_inbox_is_unreachable(self, monkeypatch):
+        # Given an inbox whose insert fails (a database blip)
+        inbox = mock.AsyncMock()
+        inbox.accept.side_effect = ConnectionError("database unreachable")
+        _wire(monkeypatch, inbox=inbox)
+
+        # When a request is accepted
+        accepted = await dispatch.accept(request=_request())
+
+        # Then it is handled anyway — durability is an assist, not a gate
+        assert accepted is True
+
+
+class TestHandleSafely:
+    async def test_finishes_the_request_even_when_the_handler_crashed(self, monkeypatch):
+        # Given an accepted request whose handler dies, and an apology spy
+        request = _request()
+        inbox = FakeInbox(in_flight=[request])
+        _wire(monkeypatch, inbox=inbox, handler=mock.AsyncMock(side_effect=RuntimeError("boom")))
+        monkeypatch.setattr(support, "notify_failure", mock.AsyncMock())
+
+        # When the request is handled
+        await dispatch.handle_safely(request)
+
+        # Then it leaves the inbox — a poisoned request must not replay on
+        # every restart
+        assert inbox.in_flight == {}
+
+    async def test_leaves_a_cancelled_run_in_the_inbox(self, monkeypatch):
+        # Given an accepted request whose run is cancelled mid-flight (shutdown)
+        request = _request()
+        inbox = FakeInbox(in_flight=[request])
+        _wire(
+            monkeypatch,
+            inbox=inbox,
+            handler=mock.AsyncMock(side_effect=asyncio.CancelledError),
+        )
+
+        # When the request is handled
+        with pytest.raises(asyncio.CancelledError):
+            await dispatch.handle_safely(request)
+
+        # Then it stays in the inbox for the next start to replay
+        assert inbox.in_flight == {request.id: request}
+
+    async def test_takes_a_handled_request_out_of_the_inbox(self, monkeypatch):
+        # Given an accepted request whose handler succeeds
+        request = _request()
+        inbox = FakeInbox(in_flight=[request])
+        handler = _wire(monkeypatch, inbox=inbox)
+
+        # When the request is handled
+        await dispatch.handle_safely(request)
+
+        # Then it was handled once and no longer waits for a replay
+        handler.assert_awaited_once_with(request=request)
+        assert inbox.in_flight == {}
+
+
+class TestUnfinishedRequests:
+    async def test_returns_what_a_dead_process_left_in_flight(self, monkeypatch):
+        # Given two requests that were in flight when the process died
+        requests = [_request("Ev-mid-flight"), _request("jira:issue:10001")]
+        inbox = FakeInbox(in_flight=requests)
+        _wire(monkeypatch, inbox=inbox)
+
+        # When the next start asks what never finished
+        unfinished = await dispatch.unfinished_requests(now=NOW)
+
+        # Then both come back for replay, after anything older than the
+        # replay window was discarded
+        assert unfinished == requests
+        assert inbox.stale_cutoffs == [NOW - timedelta(hours=24)]
