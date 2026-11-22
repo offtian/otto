@@ -16,12 +16,17 @@ import fastapi
 from agents import mcp as agents_mcp
 
 from otto import config
-from otto.application import dispatch, killswitch, support
+from otto.application import delivery, dispatch, killswitch, support
 from otto.data import db
 from otto.domain.support import entities
 from otto.interfaces.routers import base, jira, slack
 from otto.settings import settings
 from otto.utils import logs, telemetry
+
+
+# How often the always-on loop looks for due work. The shortest retry
+# backoff is 10 seconds, so a finer tick would buy nothing.
+_ALWAYS_ON_TICK_SECONDS = 10
 
 
 async def _unfinished_requests(
@@ -73,6 +78,33 @@ async def _sweep_loop(interval_seconds: int) -> None:
             await support.sweep_approvals(now=datetime.now(tz=UTC))
         except Exception as exc:
             logs.log_exception(exc, params={"job": "approval_sweep"})
+
+
+async def _always_on_tick(kill_switch: killswitch.KillSwitch) -> None:
+    """
+    Run the always-on duties once: retry the replies that could not be
+    delivered. They make Otto speak, so they honor the kill switch — while
+    Otto is silenced, due work simply waits.
+    """
+    now = datetime.now(tz=UTC)
+    if not await kill_switch.enabled(now=now):
+        return
+    await delivery.retry_due(now=now)
+
+
+async def _always_on_loop(kill_switch: killswitch.KillSwitch) -> None:
+    """
+    Run the always-on duties every few seconds for the life of the process.
+    A failed tick is logged and the loop continues.
+
+    ponytail: in-process, single-replica, like the sweep.
+    """
+    while True:
+        await asyncio.sleep(_ALWAYS_ON_TICK_SECONDS)
+        try:
+            await _always_on_tick(kill_switch)
+        except Exception as exc:
+            logs.log_exception(exc, params={"job": "always_on"})
 
 
 class _RecentIds:
@@ -180,6 +212,12 @@ async def _lifespan(started_app: fastapi.FastAPI) -> AsyncIterator[None]:
         if cfg.settings.database_url and cfg.settings.approval_sweep_interval_minutes > 0:
             background_tasks.append(
                 asyncio.create_task(_sweep_loop(cfg.settings.approval_sweep_interval_minutes * 60))
+            )
+        # The always-on duties work off the durable stores, so they too run
+        # only with a database.
+        if cfg.settings.database_url:
+            background_tasks.append(
+                asyncio.create_task(_always_on_loop(started_app.state.kill_switch))
             )
         logs.log_event("app_started", params={"otto_enabled": cfg.settings.otto_enabled})
         yield

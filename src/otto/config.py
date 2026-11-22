@@ -28,6 +28,7 @@ from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals as support_approvals
 from otto.domain.support import inbox as support_inbox
 from otto.domain.support import memory as support_memory
+from otto.domain.support import outbox as support_outbox
 from otto.domain.support import policy as support_policy
 from otto.domain.support import teams as support_teams
 from otto.settings import Settings, settings
@@ -78,6 +79,9 @@ class Configuration(pydantic.BaseModel):
     # Durable inbox for inbound requests; None = no database, so nothing
     # survives a restart to replay and redeliveries dedup in-process only.
     inbox: pydantic.SkipValidation[support_inbox.PostgresInbox | None] = None
+    # Durable outbox for replies; None = no database, so a reply is sent
+    # once, inline, and a channel failure surfaces to the caller.
+    outbox: pydantic.SkipValidation[support_outbox.PostgresOutbox | None] = None
     model: pydantic.SkipValidation[model_interface.Model] = None  # type: ignore[assignment]
     # MCP mounts are optional: None = capability runs on its local stub
     # tool, so the full loop works in dev with zero external dependencies.
@@ -206,14 +210,16 @@ class Configuration(pydantic.BaseModel):
 
     def load_stores(self) -> None:
         """
-        Wire the directory, approval store, and request inbox: DB-backed when
-        a database is configured (2.3/Phase 2); local yaml/in-memory keeps the
-        zero-dependency dev loop when DATABASE_URL is empty.
+        Wire the directory, approval store, request inbox and reply outbox:
+        DB-backed when a database is configured (2.3/Phase 2); local
+        yaml/in-memory keeps the zero-dependency dev loop when DATABASE_URL
+        is empty.
         """
         if self.settings.database_url:
             self.directory = identity_users.PostgresUserDirectory(database=db.get_db())
             self.approvals = support_approvals.PostgresApprovalStore(database=db.get_db())
             self.inbox = support_inbox.PostgresInbox(database=db.get_db())
+            self.outbox = support_outbox.PostgresOutbox(database=db.get_db())
         else:
             self.directory = identity_users.UserDirectory(
                 users=identity_users.load_users(pathlib.Path(self.settings.users_file))

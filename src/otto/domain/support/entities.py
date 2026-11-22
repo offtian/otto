@@ -46,6 +46,20 @@ class TicketRef:
 Origin = SlackThread | TicketRef
 
 
+def origin_ref(origin: Origin) -> str:
+    """
+    Return the human-followable address of an origin: a Slack thread link,
+    or the ticket's issue key.
+    """
+    match origin:
+        case SlackThread(channel_id=channel_id, thread_ts=thread_ts):
+            # Graduation note: hard-codes slack.com/archives — replace with
+            # chat.getPermalink before any Enterprise Grid rollout.
+            return f"https://slack.com/archives/{channel_id}/p{thread_ts.replace('.', '')}"
+        case TicketRef(issue_key=issue_key):
+            return issue_key
+
+
 def origin_to_json(origin: Origin) -> str:
     """
     Serialize an origin to a channel-tagged JSON string for durable storage

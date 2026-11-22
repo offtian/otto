@@ -214,6 +214,9 @@ def _wire_runtime(database: databases.Database) -> config.Configuration:
         users=identity_users.load_users(pathlib.Path(settings.users_file))
     )
     cfg.approvals = support_approvals.PostgresApprovalStore(database=database)
+    # The chat delivers inline, never through the outbox: a queued chat reply
+    # would be retried by the server process into a nonexistent Slack channel.
+    cfg.outbox = None
     return cfg
 
 

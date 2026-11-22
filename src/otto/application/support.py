@@ -12,7 +12,7 @@ import agents
 import attrs
 
 from otto import config
-from otto.application import flows, graph
+from otto.application import delivery, flows, graph
 from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals, audit, entities
@@ -48,7 +48,12 @@ async def handle_support_request(*, request: entities.SupportRequest) -> None:
             cfg=cfg,
         )
     else:
-        await _post_answer(origin=request.origin, text=str(outcome.output.final_output), cfg=cfg)
+        await delivery.deliver(
+            key=request.id,
+            origin=request.origin,
+            text=str(outcome.output.final_output),
+            vote=True,
+        )
     logs.log_event(
         "support_request_handled",
         params={"request_id": request.id, "paused": isinstance(outcome, graph.Suspend)},
@@ -120,7 +125,11 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
             channel=pending.channel,
         )
     else:
-        await _post_reply(origin=pending.origin, text=str(outcome.output.final_output), cfg=cfg)
+        await delivery.deliver(
+            key=f"approval:{approval_id}",
+            origin=pending.origin,
+            text=str(outcome.output.final_output),
+        )
     verdict = "Approved" if approved else "Denied"
     requester = await _requester_label(
         user_id=pending.requester_id, origin=pending.origin, cfg=cfg
@@ -162,14 +171,15 @@ async def notify_failure(*, request: entities.SupportRequest) -> None:
 
     :param request: the request whose handling failed.
     """
-    cfg = config.get_config()
-    await _post_reply(
+    # Same key as the run's answer — one reply per run: a request that was
+    # already answered is not apologized for as well.
+    await delivery.deliver(
+        key=request.id,
         origin=request.origin,
         text=(
             "Sorry — something went wrong on my side while handling this. "
             "The support team has been alerted; please try again in a bit."
         ),
-        cfg=cfg,
     )
 
 
@@ -225,9 +235,13 @@ async def record_feedback(*, helpful: bool, origin: entities.Origin, voter_id: s
     if helpful:
         logs.log_event(
             "request_resolved",
-            params={"signal": "helpful_vote", "origin": _origin_ref(origin), "voter_id": voter_id},
+            params={
+                "signal": "helpful_vote",
+                "origin": entities.origin_ref(origin),
+                "voter_id": voter_id,
+            },
         )
-        await _post_reply(origin=origin, text="Glad that helped! :tada:", cfg=cfg)
+        await delivery.send(origin=origin, text="Glad that helped! :tada:")
         # After the reply on purpose: this whole use-case already runs as a
         # background task, so a slow cognify never delays the confirmation —
         # and a memory outage must never fail a recorded resolution.
@@ -238,16 +252,15 @@ async def record_feedback(*, helpful: bool, origin: entities.Origin, voter_id: s
         summary="The requester reported that my answer did not resolve their issue.",
         urgency="normal",
         requester_id=voter_id,
-        origin_ref=_origin_ref(origin),
+        origin_ref=entities.origin_ref(origin),
     )
     logs.log_event(
         "feedback_negative",
-        params={"origin": _origin_ref(origin), "voter_id": voter_id},
+        params={"origin": entities.origin_ref(origin), "voter_id": voter_id},
     )
-    await _post_reply(
+    await delivery.send(
         origin=origin,
         text="Sorry that didn't help — I've flagged this for a human to take a look.",
-        cfg=cfg,
     )
 
 
@@ -314,13 +327,13 @@ async def sweep_approvals(*, now: datetime) -> None:
                 "in time and will not run."
             ),
         )
-        await _post_reply(
+        await delivery.deliver(
+            key=f"expired:{approval.id}",
             origin=approval.origin,
             text=(
                 "That request expired before anyone approved it, so I didn't run "
                 "it. Ask again if you still need it."
             ),
-            cfg=cfg,
         )
         # B5: an expiry is an audit fact — nobody decided in time.
         await cfg.approvals.record_event(
@@ -342,12 +355,20 @@ async def sweep_approvals(*, now: datetime) -> None:
             ),
         )
 
-    purged = await cfg.approvals.purge_resolved_state(
-        cutoff=now - timedelta(days=s.approval_retention_days)
+    retention_cutoff = now - timedelta(days=s.approval_retention_days)
+    purged = await cfg.approvals.purge_resolved_state(cutoff=retention_cutoff)
+    # Delivered and dead replies age out on the same retention window.
+    purged_replies = (
+        await cfg.outbox.purge(cutoff=retention_cutoff) if cfg.outbox is not None else 0
     )
     logs.log_event(
         "approval_sweep",
-        params={"expired": len(expired), "reminded": len(reminders), "purged": purged},
+        params={
+            "expired": len(expired),
+            "reminded": len(reminders),
+            "purged": purged,
+            "purged_replies": purged_replies,
+        },
     )
 
 
@@ -375,8 +396,12 @@ async def recover_approvals() -> None:
                     channel=pending.channel,
                 )
             else:
-                await _post_reply(
-                    origin=pending.origin, text=str(outcome.output.final_output), cfg=cfg
+                # The resolve path's own key: if the outcome already reached
+                # the origin before the crash, recovery does not repeat it.
+                await delivery.deliver(
+                    key=f"approval:{pending.id}",
+                    origin=pending.origin,
+                    text=str(outcome.output.final_output),
                 )
             logs.log_event(
                 "approval_recovered",
@@ -384,13 +409,13 @@ async def recover_approvals() -> None:
             )
         except Exception as exc:
             logs.log_exception(exc, params={"approval_id": pending.id, "job": "approval_recovery"})
-            await _post_reply(
+            await delivery.deliver(
+                key=f"approval:{pending.id}",
                 origin=pending.origin,
                 text=(
                     "Sorry — I couldn't finish handling your request after a "
                     "restart. The support team has been alerted; please ask again."
                 ),
-                cfg=cfg,
             )
         await cfg.approvals.mark_executed(pending.id)
 
@@ -403,21 +428,11 @@ def _build_context(
 ) -> support_agent.SupportContext:
     return support_agent.SupportContext(
         requester_id=requester_id,
-        origin_ref=_origin_ref(origin),
+        origin_ref=entities.origin_ref(origin),
         runbooks_dir=pathlib.Path(cfg.settings.runbooks_dir),
         ticket_backend=cfg.triage,
         memory=cfg.memory,
     )
-
-
-def _origin_ref(origin: entities.Origin) -> str:
-    match origin:
-        case entities.SlackThread(channel_id=channel_id, thread_ts=thread_ts):
-            # Graduation note: hard-codes slack.com/archives — replace with
-            # chat.getPermalink before any Enterprise Grid rollout.
-            return f"https://slack.com/archives/{channel_id}/p{thread_ts.replace('.', '')}"
-        case entities.TicketRef(issue_key=issue_key):
-            return issue_key
 
 
 async def _conversation_input(
@@ -537,13 +552,12 @@ async def _pause_for_approval(
             "approval_duplicate_suppressed",
             params={"request_id": request.id, "tool_name": tool_name},
         )
-        await _post_reply(
+        await delivery.send(
             origin=request.origin,
             text=(
                 "I'm already waiting on a human OK to file this for you — no "
                 "need to ask again; I'll follow up here once it's approved."
             ),
-            cfg=cfg,
         )
         return
 
@@ -577,13 +591,15 @@ async def _pause_for_approval(
             card_ts=card_ts,
         )
     )
-    await _post_reply(
+    # Keyed by the approval, not the request: a resumed run that pauses again
+    # shares its request id with the first pause but owes its own note.
+    await delivery.deliver(
+        key=f"pending:{approval.id}",
         origin=request.origin,
         text=(
             "This needs a human OK before I file it on your behalf — I've "
             "asked the support team and will follow up here with the outcome."
         ),
-        cfg=cfg,
     )
 
 
@@ -631,9 +647,11 @@ async def _remember_resolution(*, origin: entities.Origin, cfg: config.Configura
         await cfg.memory.ingest(
             text=f"Resolved support conversation (requester confirmed):\n{transcript}"
         )
-        logs.log_event("resolution_remembered", params={"origin": _origin_ref(origin)})
+        logs.log_event("resolution_remembered", params={"origin": entities.origin_ref(origin)})
     except Exception as exc:
-        logs.log_exception(exc, params={"job": "memory_ingest", "origin": _origin_ref(origin)})
+        logs.log_exception(
+            exc, params={"job": "memory_ingest", "origin": entities.origin_ref(origin)}
+        )
 
 
 def _request_from(pending: approvals.PendingApproval) -> entities.SupportRequest:
@@ -741,41 +759,6 @@ def _arguments_block(tool_arguments: str) -> str:
     return "\n".join(f"*{labels.get(key, key)}:* {value}" for key, value in args.items())
 
 
-async def _post_answer(
-    *,
-    origin: entities.Origin,
-    text: str,
-    cfg: config.Configuration,
-) -> None:
-    """
-    Deliver a knowledge answer at its origin. Slack answers carry a "Did
-    this help?" resolution vote (T2); ticket answers rely on the native
-    status signal (D6), so they post as a plain comment.
-
-    ponytail: the vote rides every non-paused Slack answer, so it also
-    trails intermediate runbook-walkthrough steps — mildly naggy. Upgrade:
-    have the agent flag a terminal answer and vote only on those.
-    """
-    match origin:
-        case entities.SlackThread(channel_id=channel_id, thread_ts=thread_ts):
-            await cfg.slack.post_answer(
-                channel=channel_id,
-                text=text,
-                thread_ts=thread_ts,
-                feedback_value=_feedback_value(origin),
-            )
-        case entities.TicketRef():
-            await _post_reply(origin=origin, text=text, cfg=cfg)
-
-
-def _feedback_value(origin: entities.SlackThread) -> str:
-    """
-    Encode a Slack thread into a button value the interaction handler can
-    split back into its channel and thread ts.
-    """
-    return f"{origin.channel_id}:{origin.thread_ts}"
-
-
 async def _begin_thinking(*, origin: entities.Origin, cfg: config.Configuration) -> None:
     """
     Show the assistant "is working" cue while Otto processes a Slack request
@@ -794,21 +777,3 @@ async def _begin_thinking(*, origin: entities.Origin, cfg: config.Configuration)
         )
     except Exception as exc:
         logs.log_exception(exc, params={"status": "set_thinking"})
-
-
-async def _post_reply(
-    *,
-    origin: entities.Origin,
-    text: str,
-    cfg: config.Configuration,
-) -> None:
-    match origin:
-        case entities.SlackThread(channel_id=channel_id, thread_ts=thread_ts):
-            await cfg.slack.post_message(channel=channel_id, text=text, thread_ts=thread_ts)
-        case entities.TicketRef(issue_key=issue_key):
-            if cfg.jira is None:
-                # Unreachable while the webhook is the only ticket intake —
-                # it rejects events whenever the gateway is unconfigured.
-                logs.log_event("ticket_reply_skipped", params={"issue_key": issue_key})
-            else:
-                await cfg.jira.post_comment(issue_key=issue_key, text=text)
