@@ -445,6 +445,44 @@ class TestAccessRequestApprovalFromTicket:
         assert "Did you restart the client?" in first_input
 
 
+class TestRunReceipt:
+    async def test_the_closing_log_line_says_which_tools_ran_but_not_what_they_were_given(
+        self, wire, monkeypatch
+    ):
+        # Given a run that reads a runbook, then answers, and a log spy
+        model = ScriptedModel(
+            [
+                [
+                    ResponseFunctionToolCall(
+                        id="fc-runbook",
+                        call_id="call-runbook",
+                        type="function_call",
+                        name="read_runbook",
+                        arguments=json.dumps({"name": "vpn"}),
+                    )
+                ],
+                [_text("Step 1: open the VPN client.")],
+            ]
+        )
+        wire(model)
+        events = mock.Mock(wraps=support.logs.log_event)
+        monkeypatch.setattr(support.logs, "log_event", events)
+
+        # When the request is handled
+        await _submit_request()
+
+        # Then the line that closes the run counts the tool by name, carries
+        # the token figures, and holds nothing of the tool's arguments
+        (handled,) = [
+            call.kwargs["params"]
+            for call in events.call_args_list
+            if call.args[0] == "support_request_handled"
+        ]
+        assert handled["tools"] == {"read_runbook": 1}
+        assert {"model_calls", "input_tokens", "output_tokens"} <= handled.keys()
+        assert "vpn" not in json.dumps(handled)
+
+
 class TestKnowledgeAnswerFeedback:
     async def test_a_slack_answer_carries_a_resolution_vote(self, wire):
         # Given a model that returns a plain knowledge answer

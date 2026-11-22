@@ -4,6 +4,7 @@ approve/deny decision to a paused run (FR1-FR8).
 """
 
 import asyncio
+import collections
 import json
 import pathlib
 import uuid
@@ -61,7 +62,11 @@ async def handle_support_request(*, request: entities.SupportRequest) -> None:
         )
     logs.log_event(
         "support_request_handled",
-        params={"request_id": request.id, "paused": isinstance(outcome, graph.Suspend)},
+        params={
+            "request_id": request.id,
+            "paused": isinstance(outcome, graph.Suspend),
+            **_receipt(outcome),
+        },
     )
 
 
@@ -158,6 +163,7 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
             "approval_id": approval_id,
             "resolver_id": resolver_id,
             "status": status.value,
+            **_receipt(outcome),
         },
     )
     if approved:
@@ -166,6 +172,27 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
             "request_resolved",
             params={"signal": "access_granted", "request_id": pending.request_id},
         )
+
+
+def _receipt(outcome: graph.Suspend | graph.Done) -> dict[str, object]:
+    """
+    Return what one run did and what it cost, for the log line that closes
+    it: model calls, tokens in and out, and how often each tool was called.
+    Names and counts only — never a tool's arguments or its output (NFR2).
+    """
+    result = outcome.payload if isinstance(outcome, graph.Suspend) else outcome.output
+    usage = result.context_wrapper.usage
+    tools = collections.Counter(
+        getattr(item.raw_item, "name", None) or "unknown"
+        for item in result.new_items
+        if item.type == "tool_call_item"
+    )
+    return {
+        "model_calls": usage.requests,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "tools": dict(tools),
+    }
 
 
 async def notify_failure(*, request: entities.SupportRequest) -> None:
