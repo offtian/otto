@@ -20,6 +20,7 @@ import yaml
 from agents.models import interface as model_interface
 
 from otto.domain.support import agent as support_agent
+from otto.domain.support import changes
 
 
 @attrs.frozen
@@ -41,8 +42,8 @@ class SpecialistProfile:
 @attrs.frozen
 class TeamProfile:
     """
-    One owning team: the services it owns and the specialists its owner
-    agent may consult.
+    One owning team: the services it owns, the specialists its owner agent
+    may consult, and the repositories it may propose changes to.
     """
 
     name: str
@@ -50,6 +51,7 @@ class TeamProfile:
     instructions: str
     services: tuple[str, ...] = ()
     specialists: tuple[str, ...] = ()
+    repos: tuple[changes.RepoProfile, ...] = ()
 
 
 @attrs.frozen
@@ -104,6 +106,15 @@ def load_registry(path: pathlib.Path) -> TeamRegistry:
             instructions=str(entry.get("instructions", "")),
             services=tuple(str(service).lower() for service in entry.get("services") or ()),
             specialists=tuple(str(name) for name in entry.get("specialists") or ()),
+            repos=tuple(
+                changes.RepoProfile(
+                    name=str(repo["name"]),
+                    description=str(repo.get("description", "")),
+                    base=str(repo.get("base", "main")),
+                    paths=tuple(str(pattern) for pattern in repo.get("paths") or ()),
+                )
+                for repo in entry.get("repos") or ()
+            ),
         )
         for entry in data.get("teams") or []
     )
@@ -129,6 +140,28 @@ When something needs time to finish, offer to check back and call
 schedule_follow_up — never promise to follow up later as text alone.
 
 """
+
+
+_CHANGE_GUIDANCE = """
+You may also propose changes to the repositories your team owns:
+{repos}
+For a provisioning or configuration request these cover, read the relevant
+files first, call preview_change until your edits apply cleanly, then call
+open_pull_request. It always needs a human approval — tell the user it was
+sent for approval and never promise the outcome. A pull request exists only
+when open_pull_request returned its address: never state that you opened or
+will open one as text alone. Collect what the change needs from the user —
+never invent a name, a size or an owner.
+"""
+
+
+def _change_guidance(repos: Sequence[changes.RepoProfile]) -> str:
+    listed = "\n".join(
+        f"- {repo.name} (branch {repo.base}): {repo.description or 'no description'} "
+        f"Changeable paths: {', '.join(repo.paths) or 'none'}."
+        for repo in repos
+    )
+    return _CHANGE_GUIDANCE.format(repos=listed)
 
 
 def build_specialist_agent(
@@ -165,12 +198,15 @@ def build_team_agents(
     model: model_interface.Model,
     specialist_mcp_tools: Mapping[str, Sequence[agents.Tool]],
     confluence_tools: Sequence[agents.Tool] | None = None,
+    repo_host: changes.RepoHost | None = None,
 ) -> dict[str, agents.Agent[support_agent.SupportContext]]:
     """
     Return one owner agent per team, sharing one built agent per specialist.
     Each specialist mounts as a ``consult_<name>`` tool — the model may call
     several in one turn, and the SDK runs same-turn tool calls concurrently,
-    which is the fanout.
+    which is the fanout. A team with repositories also gets the change tools
+    when a repository host is wired — the gated ``open_pull_request`` among
+    them, which is why they mount on the owner and never on a specialist.
 
     :raises KeyError: if a team references an undeclared specialist — a
         profile typo fails at startup, never per request.
@@ -201,9 +237,13 @@ def build_team_agents(
             )
             for name in team.specialists
         )
+        instructions = _OWNER_PREAMBLE + team.instructions
+        if team.repos and repo_host is not None:
+            tools.extend(changes.build_change_tools(repos=team.repos, host=repo_host))
+            instructions += _change_guidance(team.repos)
         owners[team.name] = agents.Agent(
             name=f"Otto-{team.name}",
-            instructions=_OWNER_PREAMBLE + team.instructions + _SHARED_GUARDRAILS,
+            instructions=instructions + _SHARED_GUARDRAILS,
             model=model,
             tools=tools,
         )

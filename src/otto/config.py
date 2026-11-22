@@ -26,6 +26,7 @@ from otto.data import db
 from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals as support_approvals
+from otto.domain.support import changes as support_changes
 from otto.domain.support import followups as support_followups
 from otto.domain.support import inbox as support_inbox
 from otto.domain.support import memory as support_memory
@@ -35,6 +36,7 @@ from otto.domain.support import teams as support_teams
 from otto.settings import Settings, settings
 from otto.utils import logs
 from otto.vendors import cognee as cognee_vendor
+from otto.vendors import github as github_vendor
 from otto.vendors import jira as jira_vendor
 from otto.vendors import llm, mcp
 from otto.vendors import slack as slack_vendor
@@ -113,6 +115,9 @@ class Configuration(pydantic.BaseModel):
     # Consolidation: what of a resolved conversation gets remembered. Wired
     # with memory; None = the conversation is remembered as it stands.
     case_distiller: pydantic.SkipValidation[support_memory.CaseDistiller | None] = None
+    # Where team-owned repositories are read and proposed against; None =
+    # no repository tools mount on any owner agent.
+    repo_host: pydantic.SkipValidation[support_changes.RepoHost | None] = None
 
     def load_memory(self) -> None:
         """
@@ -164,6 +169,7 @@ class Configuration(pydantic.BaseModel):
             model=self.model,
             specialist_mcp_tools=specialist_tools,
             confluence_tools=confluence_tools,
+            repo_host=self.repo_host,
         )
 
     def load_model(self) -> None:
@@ -209,6 +215,7 @@ class Configuration(pydantic.BaseModel):
             api_key=self.settings.llm_api_key,
             model_name=self.settings.llm_model,
         )
+        self.repo_host = build_repo_host(self.settings)
         self.jira = (
             jira_vendor.JiraGateway(
                 client=httpx.AsyncClient(
@@ -303,6 +310,23 @@ class Configuration(pydantic.BaseModel):
         self.team_registry = support_teams.load_registry(
             pathlib.Path(self.settings.team_profiles_file)
         )
+
+
+def build_repo_host(settings_: Settings) -> support_changes.RepoHost | None:
+    """
+    Return the repository host the settings call for: GitHub when a token is
+    set, the local directory stand-in when that directory exists, else None.
+    Its own function because the dev chat rebuilds loop-bound clients per
+    interaction and needs the same choice.
+    """
+    if settings_.github_token:
+        return github_vendor.build_repo_host(
+            api_url=settings_.github_api_url, token=settings_.github_token
+        )
+    local = pathlib.Path(settings_.local_repos_dir)
+    if local.is_dir():
+        return support_changes.LocalRepoHost(root=local)
+    return None
 
 
 async def _mounted_tools(mount: mcp.MCPServerMount | None) -> list[agents.Tool] | None:

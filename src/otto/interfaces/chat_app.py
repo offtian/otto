@@ -201,6 +201,8 @@ def _wire_runtime(database: databases.Database) -> config.Configuration:
         # The dev chat mounts no specialist MCP servers — specialists run
         # on their instructions alone.
         specialist_mcp_tools={},
+        # Rebuilt here like every other loop-bound client.
+        repo_host=config.build_repo_host(settings),
     )
     cfg.intent_classifier = llm.build_intent_classifier(
         base_url=settings.llm_base_url,

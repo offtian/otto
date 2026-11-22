@@ -1,0 +1,138 @@
+import json
+
+import httpx
+
+from otto.vendors import github
+
+
+def _host(handler) -> github.GitHubRepoHost:
+    return github.GitHubRepoHost(
+        client=httpx.AsyncClient(
+            base_url="https://api.github.test", transport=httpx.MockTransport(handler)
+        )
+    )
+
+
+class TestReadFile:
+    async def test_returns_the_raw_text_at_the_ref(self):
+        # Given a repository that has the file on the asked branch
+        seen = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((request.url.path, request.url.params["ref"], request.headers["accept"]))
+            return httpx.Response(200, text="workspace_quotas = {}\n")
+
+        # When the file is read
+        content = await _host(handler).read_file(
+            repo="acme/infra-live", path="coder/quotas.tfvars", ref="main"
+        )
+
+        # Then its raw text comes back, asked for at that branch
+        assert content == "workspace_quotas = {}\n"
+        assert seen == [
+            (
+                "/repos/acme/infra-live/contents/coder/quotas.tfvars",
+                "main",
+                "application/vnd.github.raw+json",
+            )
+        ]
+
+    async def test_returns_none_for_a_file_that_does_not_exist(self):
+        # Given a repository without the file
+        # When the file is read
+        content = await _host(lambda request: httpx.Response(404, json={})).read_file(
+            repo="acme/infra-live", path="coder/missing.tfvars", ref="main"
+        )
+
+        # Then there is no content — a new file, not an error
+        assert content is None
+
+
+class TestListDirectory:
+    async def test_marks_directories_and_sorts(self):
+        # Given a directory holding a file and a subdirectory
+        entries = [
+            {"path": "coder/templates", "type": "dir"},
+            {"path": "coder/quotas.tfvars", "type": "file"},
+        ]
+
+        # When it is listed
+        listed = await _host(lambda request: httpx.Response(200, json=entries)).list_directory(
+            repo="acme/infra-live", path="coder", ref="main"
+        )
+
+        # Then both come back sorted, the directory ending in a slash
+        assert listed == ["coder/quotas.tfvars", "coder/templates/"]
+
+
+class TestOpenPullRequest:
+    async def test_commits_once_on_a_new_branch_and_opens_the_pull_request(self):
+        # Given a repository whose main branch is at one commit
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content) if request.content else None
+            calls.append((request.method, request.url.path, payload))
+            answers = {
+                "/repos/acme/infra-live/git/ref/heads/main": {"object": {"sha": "head-sha"}},
+                "/repos/acme/infra-live/git/commits/head-sha": {"tree": {"sha": "base-tree"}},
+                "/repos/acme/infra-live/git/trees": {"sha": "new-tree"},
+                "/repos/acme/infra-live/git/commits": {"sha": "new-commit"},
+                "/repos/acme/infra-live/git/refs": {"ref": "refs/heads/otto/raise-quota"},
+                "/repos/acme/infra-live/pulls": {
+                    "html_url": "https://github.com/acme/infra-live/pull/7"
+                },
+            }
+            return httpx.Response(200, json=answers[request.url.path])
+
+        # When a pull request is opened with one edited file
+        url = await _host(handler).open_pull_request(
+            repo="acme/infra-live",
+            base="main",
+            branch="otto/raise-quota",
+            title="Raise the AI team's CPU quota",
+            body="Requested for the Q4 training runs.",
+            files={"coder/quotas.tfvars": "workspace_quotas = {}\n"},
+        )
+
+        # Then the file is committed on top of main's tree, the new branch
+        # points at that commit, and the pull request targets main
+        writes = [(path, payload) for method, path, payload in calls if method == "POST"]
+        assert url == "https://github.com/acme/infra-live/pull/7"
+        assert writes == [
+            (
+                "/repos/acme/infra-live/git/trees",
+                {
+                    "base_tree": "base-tree",
+                    "tree": [
+                        {
+                            "path": "coder/quotas.tfvars",
+                            "mode": "100644",
+                            "type": "blob",
+                            "content": "workspace_quotas = {}\n",
+                        }
+                    ],
+                },
+            ),
+            (
+                "/repos/acme/infra-live/git/commits",
+                {
+                    "message": "Raise the AI team's CPU quota",
+                    "tree": "new-tree",
+                    "parents": ["head-sha"],
+                },
+            ),
+            (
+                "/repos/acme/infra-live/git/refs",
+                {"ref": "refs/heads/otto/raise-quota", "sha": "new-commit"},
+            ),
+            (
+                "/repos/acme/infra-live/pulls",
+                {
+                    "title": "Raise the AI team's CPU quota",
+                    "head": "otto/raise-quota",
+                    "base": "main",
+                    "body": "Requested for the Q4 training runs.",
+                },
+            ),
+        ]

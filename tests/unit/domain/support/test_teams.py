@@ -6,7 +6,7 @@ import pytest
 from agents.models.interface import Model
 
 from otto.domain.support import agent as support_agent
-from otto.domain.support import teams
+from otto.domain.support import changes, teams
 
 
 PROFILE_YAML = textwrap.dedent(
@@ -204,3 +204,63 @@ class TestBuildTeamAgents:
             teams.build_team_agents(
                 registry=registry, model=_NeverCalledModel(), specialist_mcp_tools={}
             )
+
+
+REPO_YAML = textwrap.dedent(
+    """
+    teams:
+      - name: platform
+        services: [coder]
+        instructions: You own developer-platform issues.
+        repos:
+          - name: acme/infra-live
+            description: Workspace quotas.
+            paths: ["coder/*"]
+    """
+)
+
+
+class TestTeamRepositories:
+    def _registry(self, tmp_path):
+        path = tmp_path / "teams.yaml"
+        path.write_text(REPO_YAML)
+        return teams.load_registry(path)
+
+    def test_parses_the_repositories_a_team_owns(self, tmp_path):
+        # Given a profiles file whose team lists a repository
+        # When the registry is loaded
+        (team,) = self._registry(tmp_path).teams
+
+        # Then the repository comes back with its allowlist and default branch
+        assert team.repos == (
+            changes.RepoProfile(
+                name="acme/infra-live",
+                description="Workspace quotas.",
+                base="main",
+                paths=("coder/*",),
+            ),
+        )
+
+    def test_the_owner_gets_the_change_tools_only_with_a_repository_host(self, tmp_path):
+        # Given a team that owns a repository
+        registry = self._registry(tmp_path)
+
+        # When its owner is built with a repository host, and without one
+        with_host = teams.build_team_agents(
+            registry=registry,
+            model=_NeverCalledModel(),
+            specialist_mcp_tools={},
+            repo_host=changes.LocalRepoHost(root=tmp_path),
+        )["platform"]
+        without_host = teams.build_team_agents(
+            registry=registry, model=_NeverCalledModel(), specialist_mcp_tools={}
+        )["platform"]
+
+        # Then only the first can read and propose, its one write is gated,
+        # and only its instructions mention the repository
+        gates = {tool.name: getattr(tool, "needs_approval", False) for tool in with_host.tools}
+        assert gates["open_pull_request"] is True
+        assert gates["preview_change"] is False
+        assert "acme/infra-live" in str(with_host.instructions)
+        assert "open_pull_request" not in {tool.name for tool in without_host.tools}
+        assert "acme/infra-live" not in str(without_host.instructions)

@@ -1,0 +1,10 @@
+# Fixture only — exists so tests can show CI configuration is off limits.
+name: apply
+on:
+  push:
+    branches: [main]
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
