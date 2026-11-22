@@ -28,6 +28,15 @@ The one sanctioned exception is the settings singleton:
 from otto.settings import settings
 ```
 
+Imports go at module top. The one sanctioned lazy import is `cognee`, inside
+`vendors/cognee.py::build_memory_store` — do not hoist it: importing Cognee at
+module load costs seconds on every start, and raises a deprecation warning the
+test suite treats as an error.
+
+A class field must not share its name with a module its annotation references
+(`specialists: tuple[specialists.Profile, ...] = ()` fails at import — the
+value is assigned before the annotation is evaluated). Alias the import.
+
 ### Settings vs Config
 
 - `settings.py` owns configuration **values** (env vars). Add fields to `Settings`.
@@ -35,14 +44,74 @@ from otto.settings import settings
   Wire them into `Configuration` and read them via `config.get_config()` from
   the application/interfaces layers only.
 
+### Ports
+
+Every seam the application layer talks through is a `Protocol` in the domain
+module of its concept — `Inbox`, `Outbox`, `FollowUpStore`, `MemoryStore`,
+`RepoHost`, `ChangeReviewer`, and so on.
+
+- The contract lives on the port: what each method returns and what it raises.
+- Implementations sit beside it in `domain/` (the Postgres stores) or in
+  `vendors/`, which satisfies a port structurally and never imports domain.
+- Type `Configuration` fields and callers against the port, never the
+  implementation.
+- A module's docstring states its contract in plain sentences and lists its
+  row states (`pending` / `sent` / `dead`).
+
 ### Logging
 
 - `structlog` exclusively — stdlib `logging` forbidden (enforced by import-linter)
 - `logs.log_event("event_name", params={...})` for events
 - `logs.log_exception(exc, params={...})` for errors
+- Never log what derives from a conversation — request text, memory passages,
+  recall keywords, tool output. Log ids and counts (NFR2).
 
 ### Layer Boundaries
 
 Enforced by import-linter (`uv run lint-imports`, part of `just lint`):
 new top-level modules under `src/otto/` must be added to the
 `layers` contract in `pyproject.toml` — the contract is exhaustive on purpose.
+
+## How a Request Moves
+
+```
+router → dispatch.accept → dispatch.handle_safely → flows.SUPPORT → delivery.deliver
+         (durable inbox)                            (classify →     (outbox)
+                                                     access | general)
+```
+
+- **A run's reply leaves through `delivery.deliver(key=...)`**, never straight
+  through `cfg.slack` or `cfg.jira`. The key allows one reply per key, ever: the
+  request id for an answer or its apology; `approval:<id>`, `pending:<id>` and
+  `expired:<id>` for approval outcomes. Courtesy notes (`delivery.send`) and
+  approval cards are the only exceptions.
+- **The always-on stores are assists, not gates.** Inbox, outbox, follow-ups
+  and memory fail open: log the error and carry on without them.
+- **Anything that makes Otto speak on its own** — reply retries, follow-ups,
+  startup replay — checks the kill switch first.
+- **Approval-gated tools mount only on top-level agents.** Specialists and the
+  reviewer are read-only: a pause inside a nested run can never be approved.
+
+## Extending Otto
+
+- **A specialist or a repository** is an entry in `otto.yaml` (two flat lists),
+  mounted on the general agent by `catalog.mount`. No new agent, no routing,
+  no orchestration code.
+- **A new write** is a function tool with `needs_approval=True`. An MCP tool is
+  gated unless `policy.UNGATED_TOOLS` clears it with a sign-off reference.
+- **A repository change** goes through `domain/support/changes`: exact-match
+  edits, the path allowlist, `stage_proposal`. Nothing writes to a repository
+  except the gated `open_pull_request`, and what the approval card shows is
+  what gets applied.
+- **A new model role** (classifier, distiller, reviewer) is a setting naming a
+  model on the same gateway — no vendor-specific SDK.
+
+## Database
+
+- `data/models.py` is the schema source of truth. Migrations are hand-written
+  and mirror it; render one with
+  `alembic -c src/otto/data/alembic.ini upgrade <from>:<to> --sql`.
+- Cast interval parameters explicitly — `sa.func.now() + sa.cast(delta, sa.Interval)`.
+  Untyped, Postgres reads `now() - $1` as timestamp minus timestamp.
+- Integration tests (`RUN_INTEGRATION=1`) need Postgres: `just infra`,
+  `just run-db-migrations`, `just test-integration`.
