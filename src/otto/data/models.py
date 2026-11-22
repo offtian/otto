@@ -76,6 +76,31 @@ class ApprovalRecord(SQLModel, table=True):
     )
 
 
+class InboundRequestRecord(SQLModel, table=True):
+    """
+    One inbound support request between its intake ack and the end of its
+    handler — the durable inbox. The row is written before the channel is
+    told "received" and deleted once the handler finished, so a row that
+    survives a restart is a request somebody is still waiting on (startup
+    replays it). The primary key is the channel's own delivery id (Slack
+    ``event_id``, ``jira:issue:<id>``), which makes a redelivery of an
+    in-flight request a no-op on every replica.
+    """
+
+    __tablename__ = "inbound_requests"
+
+    id: str = Field(primary_key=True)
+    requester_id: str
+    origin: str = Field(sa_column=Column(Text, nullable=False))  # serialized Origin (json)
+    # Conversation content (PII): kept only while the request is in flight —
+    # the row is deleted on completion, never retained.
+    request_text: str = Field(sa_column=Column(Text, nullable=False))
+    received_at: datetime = Field(
+        default_factory=lambda: datetime.now(tz=UTC),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
 class RuntimeFlagRecord(SQLModel, table=True):
     """
     One runtime-tunable flag (C1): today only ``otto_enabled`` — the kill

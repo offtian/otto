@@ -52,6 +52,10 @@ async def slack_events(
     if not request.app.state.rate_limiter.allow(support_request.user_id, now=datetime.now(tz=UTC)):
         logs.log_event("slack_rate_limited", params={"user_id": support_request.user_id})
         return fastapi.Response()
+    # Durable before the ack: once Slack hears 200 it never redelivers, so
+    # the inbox row is what lets a restart replay this request.
+    if not await dispatch.accept(request=support_request):
+        return fastapi.Response()
     background.add_task(dispatch.handle_safely, support_request)
     return fastapi.Response()
 
