@@ -13,7 +13,8 @@ it gets that back. Three kinds, after waku-agent's split:
               note nothing has confirmed for the retention window is
               forgotten.
   procedural  How to act — the runbooks, read on demand through the runbook
-              tools (``agent``). Not stored here.
+              tools (``agent``); ``runbooks`` tells the agent which ones a
+              request looks to be about. Not stored here.
 
 Memory goes in by consolidation (``consolidation``): on a confirmed
 resolution the conversation is distilled into a note, or matched to one
