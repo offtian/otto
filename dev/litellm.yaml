@@ -17,3 +17,12 @@ model_list:
     litellm_params:
       model: ollama_chat/qwen3.6
       api_base: http://host.docker.internal:11434
+
+  # A second model family, for REVIEWER_MODEL — the reviewer is most useful on
+  # a different model from the one writing the change. Uncomment, and pass
+  # ANTHROPIC_API_KEY to the litellm service in compose.yml.
+  # - model_name: claude-opus-5-5
+  #   litellm_params:
+  #     model: anthropic/claude-opus-5-5
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+

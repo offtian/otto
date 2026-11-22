@@ -20,7 +20,7 @@ Two ports. ``RepoHost`` is wherever repositories live: GitHub
 (``vendors/github``), or a local directory (``LocalRepoHost``) in dev.
 ``ChangeReviewer`` is an independent second opinion on a staged change,
 shown to the approver beside the card — advisory only: it never approves,
-blocks or alters anything.
+blocks or alters anything (an agent on any model, ``reviewer``).
 """
 
 import difflib
@@ -428,13 +428,22 @@ class RepoTools:
 
     def as_tools(self) -> list[agents.Tool]:
         """
-        Return the four tools, ready to mount on an agent.
+        Return all four tools, ready to mount on a top-level agent.
+        """
+        return [
+            *self.read_only_tools(),
+            agents.function_tool(self.preview_change),
+            agents.function_tool(self.open_pull_request, needs_approval=True),
+        ]
+
+    def read_only_tools(self) -> list[agents.Tool]:
+        """
+        Return only the tools that look — listing and reading — for an agent
+        that must never propose or write, such as the reviewer.
         """
         return [
             agents.function_tool(self.list_repo_files),
             agents.function_tool(self.read_repo_file),
-            agents.function_tool(self.preview_change),
-            agents.function_tool(self.open_pull_request, needs_approval=True),
         ]
 
     async def list_repo_files(self, repo: str, path: str) -> str:

@@ -3,6 +3,7 @@ Support use-cases: handle one inbound request end-to-end, and apply a human
 approve/deny decision to a paused run (FR1-FR8).
 """
 
+import asyncio
 import json
 import pathlib
 import uuid
@@ -17,6 +18,11 @@ from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals, audit, changes, entities
 from otto.utils import logs
+
+
+# The longest an approval card waits for its second opinion before going up
+# without one.
+_REVIEW_TIMEOUT_SECONDS = 60
 
 
 async def handle_support_request(*, request: entities.SupportRequest) -> None:
@@ -645,12 +651,14 @@ async def _proposal_note(*, tool_arguments: str, cfg: config.Configuration) -> s
     if cfg.change_reviewer is None:
         return None
     try:
-        review = await cfg.change_reviewer.review(
-            profile=profile,
-            title=str(proposal.get("title", "")),
-            summary=str(proposal.get("summary", "")),
-            files=staged,
-        )
+        # Bounded: the card waits for this, and an approver waits for the card.
+        async with asyncio.timeout(_REVIEW_TIMEOUT_SECONDS):
+            review = await cfg.change_reviewer.review(
+                profile=profile,
+                title=str(proposal.get("title", "")),
+                summary=str(proposal.get("summary", "")),
+                files=staged,
+            )
     except Exception as exc:
         logs.log_exception(exc, params={"job": "change_review"})
         return None

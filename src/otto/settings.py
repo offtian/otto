@@ -146,6 +146,12 @@ class Settings(BaseSettings):
     github_api_url: str = "https://api.github.com"
     local_repos_dir: str = "fixtures/repos"
 
+    # The change reviewer: a model, served by the same gateway as llm_model,
+    # that gives the approver a second opinion on each proposed pull request.
+    # Any model works; a different one from llm_model makes it an independent
+    # check rather than the author marking its own work. Empty = no reviewer.
+    reviewer_model: str = ""
+
     # Directory of markdown runbooks the agent can walk users through.
     # Relative paths resolve against the process cwd (repo root for
     # `just run` and the compose app container alike).
