@@ -220,6 +220,8 @@ def _wire_runtime(database: databases.Database) -> config.Configuration:
     # The chat delivers inline, never through the outbox: a queued chat reply
     # would be retried by the server process into a nonexistent Slack channel.
     cfg.outbox = None
+    # And it displays Markdown itself, so replies are not rendered for Slack.
+    cfg.channel_markup = False
     return cfg
 
 

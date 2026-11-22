@@ -42,7 +42,7 @@ class FakeOutbox:
         self.failures.append((message_id, error, retry_in))
 
 
-def _wire(monkeypatch, *, store):
+def _wire(monkeypatch, *, store, jira=None, channel_markup=True):
     """
     Stub the wired config with the given outbox and return the Slack spy.
     """
@@ -50,7 +50,8 @@ def _wire(monkeypatch, *, store):
     cfg = types.SimpleNamespace(
         outbox=store,
         slack=slack,
-        jira=None,
+        jira=jira,
+        channel_markup=channel_markup,
         settings=types.SimpleNamespace(slack_triage_channel="C_TRIAGE"),
     )
     monkeypatch.setattr(config, "get_config", lambda: cfg)
@@ -114,6 +115,46 @@ class TestDeliver:
 
         # Then it is sent anyway — the outbox is an assist, not a gate
         assert slack.post_message.await_count == 1
+
+
+class TestSend:
+    MARKDOWN = "**Restart** the client — see [the runbook](https://kb.example.com/vpn)"
+
+    async def test_renders_a_reply_into_slacks_markup(self, monkeypatch):
+        # Given a Slack conversation and a reply written in Markdown
+        slack = _wire(monkeypatch, store=None)
+
+        # When it is sent
+        await delivery.send(origin=THREAD, text=self.MARKDOWN)
+
+        # Then Slack receives its own bold and link syntax
+        assert slack.post_message.await_args.kwargs["text"] == (
+            "*Restart* the client — see <https://kb.example.com/vpn|the runbook>"
+        )
+
+    async def test_renders_a_reply_into_jiras_markup(self, monkeypatch):
+        # Given a ticket and a reply written in Markdown
+        jira = mock.AsyncMock()
+        _wire(monkeypatch, store=None, jira=jira)
+
+        # When it is sent
+        await delivery.send(origin=entities.TicketRef(issue_key="IT-7"), text=self.MARKDOWN)
+
+        # Then the comment uses Jira's link syntax, not Slack's
+        jira.post_comment.assert_awaited_once_with(
+            issue_key="IT-7",
+            text="*Restart* the client — see [the runbook|https://kb.example.com/vpn]",
+        )
+
+    async def test_leaves_markdown_alone_where_the_surface_displays_it(self, monkeypatch):
+        # Given a surface that shows Markdown itself (the dev chat)
+        slack = _wire(monkeypatch, store=None, channel_markup=False)
+
+        # When a reply is sent
+        await delivery.send(origin=THREAD, text=self.MARKDOWN)
+
+        # Then it arrives as written
+        assert slack.post_message.await_args.kwargs["text"] == self.MARKDOWN
 
 
 class TestRetryDue:
