@@ -139,8 +139,12 @@ router → dispatch.accept → dispatch.handle_safely → flows.SUPPORT → deli
   `alembic -c src/otto/data/alembic.ini upgrade <from>:<to> --sql`.
 - Cast interval parameters explicitly — `sa.func.now() + sa.cast(delta, sa.Interval)`.
   Untyped, Postgres reads `now() - $1` as timestamp minus timestamp.
-- Integration tests (`RUN_INTEGRATION=1`) need Postgres: `just infra`,
-  `just run-db-migrations`, `just test-integration`.
-- The database must offer the `vector` extension from migration 0017 on (the
-  compose image is `pgvector/pgvector`). A vector travels as text and is cast
-  in SQL (`memory._as_vector`): no pgvector package, no driver codec.
+- Integration tests (`RUN_INTEGRATION=1`) need the compose Postgres and, for
+  the sandbox, a running Docker daemon: `just infra`, `just test-integration`.
+  They empty the tables they use, so the recipe runs them in a scratch
+  database (`otto_test`) that it creates and migrates — never the dev one.
+- The database must offer the `vector` extension from migration 0017 on. The
+  compose image is `pgvector/pgvector:pg17-trixie` — the tag built on the same
+  Debian as `postgres:17`, so a data directory one of them created opens in
+  the other without a collation version mismatch. A vector travels as text and
+  is cast in SQL (`memory._as_vector`): no pgvector package, no driver codec.
