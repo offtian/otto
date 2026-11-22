@@ -66,6 +66,34 @@ class TestLoadCatalog:
             ),
         )
 
+    def test_reads_the_checks_a_repository_declares(self, tmp_path):
+        # Given a catalog in which one repository declares checks and one does not
+        declared = textwrap.dedent(
+            """
+            repos:
+              - name: acme/infra-live
+                paths: ["coder/*"]
+                checks:
+                  image: hashicorp/terraform:1.9
+                  run:
+                    - terraform fmt -check -recursive
+                    - terraform validate
+              - name: acme/docs
+            """
+        )
+
+        # When it is loaded
+        checked, unchecked = catalog.load_catalog(_write(tmp_path, declared)).repos
+
+        # Then the first carries its image and commands, with no network
+        # unless it asks, and the second carries none
+        assert checked.checks == changes.Checks(
+            image="hashicorp/terraform:1.9",
+            commands=("terraform fmt -check -recursive", "terraform validate"),
+            network=False,
+        )
+        assert unchecked.checks is None
+
     def test_a_missing_file_is_an_empty_catalog(self, tmp_path):
         # Given no catalog file
         # When it is loaded

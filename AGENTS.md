@@ -124,6 +124,11 @@ router → dispatch.accept → dispatch.handle_safely → flows.SUPPORT → deli
   approval card shows is what gets applied. A pull request is revised only if
   it carries this conversation's signed return address (`find_revisable`) —
   never a branch Otto did not create.
+- **A repository's checks** (`checks:` in `otto.yaml`) are its own commands,
+  run on each proposed change in a sandbox and shown to the approver under the
+  card (`domain/support/checks`, `vendors/docker`). Advisory, like the review.
+  They execute files a model edited: no credentials, no network unless the
+  entry asks, and their output is shown as plain text.
 - **A new model role** (classifier, distiller, reviewer, embedder) is a setting
   naming a model on the same gateway — no vendor-specific SDK.
 

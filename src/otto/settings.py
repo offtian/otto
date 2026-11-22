@@ -172,6 +172,14 @@ class Settings(BaseSettings):
     # Any model works; a different one from llm_model makes it an independent
     # check rather than the author marking its own work. Empty = no reviewer.
     reviewer_model: str = ""
+    # Pre-flight checks: run the commands a catalogued repository declares
+    # (`checks` in otto.yaml) on each proposed change, in a throwaway Docker
+    # container, and show the approver what they said. Off by default: it
+    # needs a Docker daemon this process may use, and it executes files a
+    # model edited. The timeout bounds the whole pre-flight — the approval
+    # card waits for it.
+    sandbox_enabled: bool = False
+    sandbox_timeout_seconds: int = 120
 
     # Directory of markdown runbooks the agent can walk users through.
     # Relative paths resolve against the process cwd (repo root for

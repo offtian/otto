@@ -1,5 +1,7 @@
+import io
 import json
 import pathlib
+import tarfile
 
 import pytest
 from agents import tool_context
@@ -704,6 +706,26 @@ class TestLocalRepoHost:
         # Then files and directories come back, directories ending in a slash
         assert "README.md" in listed
         assert "coder/" in listed
+
+    async def test_packs_the_checked_out_repository_without_its_history(self, tmp_path):
+        # Given a checked-out repository with a file, a .gitignore and a
+        # .git directory
+        repo = tmp_path / "acme" / "infra-live"
+        (repo / "coder").mkdir(parents=True)
+        (repo / "coder" / "quotas.tfvars").write_text(QUOTAS)
+        (repo / ".gitignore").write_text(".terraform/\n")
+        (repo / ".git").mkdir()
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/main")
+
+        # When it is downloaded
+        archive = await changes.LocalRepoHost(root=tmp_path).download(
+            repo="acme/infra-live", ref="main"
+        )
+
+        # Then the archive holds its files and none of its history
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+            names = {member.name for member in tar.getmembers() if member.isfile()}
+        assert names == {"./coder/quotas.tfvars", "./.gitignore"}
 
     async def test_refuses_to_read_outside_the_repository(self):
         # Given the fixture repository on disk

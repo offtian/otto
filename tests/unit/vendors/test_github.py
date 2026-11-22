@@ -283,3 +283,27 @@ class TestPushCommit:
                 {"sha": "new-commit", "force": False},
             ),
         ]
+
+
+class TestDownload:
+    async def test_follows_githubs_redirect_to_the_archive(self):
+        # Given a repository whose archive GitHub serves from another address
+        seen = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(str(request.url))
+            if request.url.path == "/repos/acme/infra-live/tarball/head-sha":
+                return httpx.Response(
+                    302, headers={"location": "https://codeload.github.test/archive"}
+                )
+            return httpx.Response(200, content=b"packed-repository")
+
+        # When the repository is downloaded at a commit
+        archive = await _host(handler).download(repo="acme/infra-live", ref="head-sha")
+
+        # Then the redirect was followed and the archive's bytes come back
+        assert archive == b"packed-repository"
+        assert seen == [
+            "https://api.github.test/repos/acme/infra-live/tarball/head-sha",
+            "https://codeload.github.test/archive",
+        ]

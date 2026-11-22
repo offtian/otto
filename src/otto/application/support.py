@@ -8,7 +8,9 @@ import collections
 import json
 import pathlib
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
+from typing import Any
 
 import agents
 import attrs
@@ -17,7 +19,7 @@ from otto import config
 from otto.application import delivery, flows, graph
 from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
-from otto.domain.support import approvals, audit, changes, entities
+from otto.domain.support import approvals, audit, changes, checks, entities
 from otto.utils import logs
 
 
@@ -696,10 +698,11 @@ async def _proposal_note(
     """
     Return what the approver should know about a paused pull request
     proposal — a new one, or a revision of one — beyond its edits, as mrkdwn
-    for the card's thread: that it will not apply as proposed, or an
-    independent reviewer's opinion of it. None when there is nothing to add —
-    the paused call is not a proposal, there is nothing to check it against,
-    or the reviewer could not be reached.
+    for the card's thread: that it will not apply as proposed; or else what
+    the repository's own checks say about it, and an independent reviewer's
+    opinion of it. None when there is nothing to add — the paused call is
+    not a proposal, there is nothing to check it against, and nothing is
+    wired to check or review it.
 
     Advisory by construction: nothing here approves, blocks or changes the
     proposal, and every failure degrades to the card alone.
@@ -707,17 +710,25 @@ async def _proposal_note(
     proposal = changes.proposal_arguments(tool_arguments)
     if proposal is None or cfg.repo_host is None:
         return None
+    profiles = {repo.name: repo for repo in cfg.catalog.repos}
     try:
-        profile, staged = await changes.stage_proposal(
-            host=cfg.repo_host,
-            profiles={repo.name: repo for repo in cfg.catalog.repos},
-            arguments=proposal,
-            revision=tool_name == changes.UPDATE_PULL_REQUEST,
-            # What a revision is checked against: only this conversation's
-            # own pull request may be revised from it.
-            origin=origin,
-            signing_key=cfg.settings.github_webhook_secret,
-        )
+        # A revision is the tool that revises, never a call that merely
+        # carries a number — and only this conversation's own pull request
+        # may be revised from it.
+        if tool_name == changes.UPDATE_PULL_REQUEST:
+            profile, pull, staged = await changes.stage_revision(
+                host=cfg.repo_host,
+                profiles=profiles,
+                arguments=proposal,
+                origin=origin,
+                signing_key=cfg.settings.github_webhook_secret,
+            )
+            ref = pull.head
+        else:
+            profile, staged = await changes.stage_proposal(
+                host=cfg.repo_host, profiles=profiles, arguments=proposal
+            )
+            ref = profile.base
     except changes.EditRejected as exc:
         return (
             f":warning: *This change will not apply as proposed:* {exc}. "
@@ -726,6 +737,60 @@ async def _proposal_note(
     except Exception as exc:
         logs.log_exception(exc, params={"job": "proposal_preflight"})
         return None
+    # Side by side: the card waits for the slower of the two, not for both.
+    notes = await asyncio.gather(
+        _checks_note(profile=profile, staged=staged, ref=ref, cfg=cfg),
+        _review_note(proposal=proposal, profile=profile, staged=staged, cfg=cfg),
+    )
+    return "\n\n".join(note for note in notes if note) or None
+
+
+async def _checks_note(
+    *,
+    profile: changes.RepoProfile,
+    staged: Sequence[changes.StagedFile],
+    ref: str,
+    cfg: config.Configuration,
+) -> str | None:
+    """
+    Return what the repository's own checks say about a staged change, as
+    mrkdwn — None when it declares none, or nothing is wired to run them.
+    Checks that could not run or did not finish say so in a line: the
+    approver should know they exist and are silent, not take silence for a
+    pass.
+    """
+    if cfg.change_checker is None or profile.checks is None:
+        return None
+    budget = cfg.settings.sandbox_timeout_seconds
+    try:
+        # Bounded: the card waits for this, and an approver waits for the card.
+        async with asyncio.timeout(budget):
+            report = await cfg.change_checker.check(profile=profile, files=staged, ref=ref)
+    except TimeoutError:
+        return (
+            f":hourglass: The repository's checks did not finish in {budget} seconds, "
+            "so there is no result from them here."
+        )
+    except Exception as exc:
+        logs.log_exception(exc, params={"job": "change_checks"})
+        return (
+            ":grey_question: The repository's checks could not be run, so there is "
+            "no result from them here."
+        )
+    return checks.render_checks(report) if report is not None else None
+
+
+async def _review_note(
+    *,
+    proposal: Mapping[str, Any],
+    profile: changes.RepoProfile,
+    staged: Sequence[changes.StagedFile],
+    cfg: config.Configuration,
+) -> str | None:
+    """
+    Return an independent reviewer's opinion of a staged change, as mrkdwn —
+    None when no reviewer is wired, or it could not be reached in time.
+    """
     if cfg.change_reviewer is None:
         return None
     try:
