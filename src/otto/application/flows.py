@@ -6,10 +6,16 @@ Agent nodes are the only ones that may suspend (HITL) — ``support`` persists
 the suspended node name plus ``dump_state``'s durable subset on the
 approval, and a human decision re-enters the graph exactly there.
 
+The classify node is also the retrieval gate: the same reading says whether
+long-term memory is worth searching for this request, and only then are past
+cases recalled into the agent's input — retrieval on every turn is slower
+and, worse, lets irrelevant memories bias the answer.
+
 State keys the nodes read: ``text`` (the raw request, for the classifier),
-``input`` (the rebuilt conversation input), ``ctx`` (the ``SupportContext``),
-``team`` (set by classify when an owning team resolved), and optionally
-``resume`` (a paused run's serialized state plus the human decision).
+``input`` (the rebuilt conversation input, plus any recalled past cases),
+``ctx`` (the ``SupportContext``), ``team`` (set by classify when an owning
+team resolved), and optionally ``resume`` (a paused run's serialized state
+plus the human decision).
 """
 
 import json
@@ -27,17 +33,25 @@ ACCESS = "access"
 GENERAL = "general"
 OWNER = "owner"
 
+# How many recalled past cases may ride along with one request.
+_RECALL_LIMIT = 3
+
 
 async def _classify(state: graph.State) -> graph.NodeResult:
     """
-    Route the request to a flow node. Fail-open: no classifier, a classifier
+    Route the request to a flow node, recalling past cases on the way if
+    the reading says they would help. Fail-open: no classifier, a classifier
     error, an unresolved team, or a plain question all land on the general
     agent — misrouting can only cost focus, never capability.
     """
     cfg = config.get_config()
-    if cfg.intent_classifier is None or (cfg.access_agent is None and not cfg.team_agents):
+    # A reading is worth its call only if something acts on it: a flow to
+    # route to, or a memory to gate.
+    useful = cfg.access_agent is not None or bool(cfg.team_agents) or cfg.memory is not None
+    if cfg.intent_classifier is None or not useful:
         return graph.Goto(GENERAL)
     reading = await cfg.intent_classifier.classify(text=state["text"])
+    await _recall(state, cfg=cfg, query=reading.recall)
     node, team = _route(cfg=cfg, reading=reading)
     if team:
         state["team"] = team
@@ -45,6 +59,34 @@ async def _classify(state: graph.State) -> graph.NodeResult:
     # services — those are derived from untrusted message text (NFR2).
     logs.log_event("intent_routed", params={"intent": reading.intent, "node": node, "team": team})
     return graph.Goto(node)
+
+
+async def _recall(state: graph.State, *, cfg: config.Configuration, query: str) -> None:
+    """
+    Pass the retrieval gate: search long-term memory with the classifier's
+    keywords and append what comes back to the agent's input, framed as
+    possibly irrelevant. A closed gate (no keywords), no memory, nothing
+    found, or a memory outage all leave the input untouched — recall is an
+    assist, never a dependency, and the agent can still search for itself.
+    """
+    if not query or cfg.memory is None or not isinstance(state.get("input"), str):
+        return
+    try:
+        passages = await cfg.memory.search(query=query)
+    except Exception as exc:
+        logs.log_exception(exc, params={"job": "memory_recall"})
+        return
+    recalled = passages[:_RECALL_LIMIT]
+    if not recalled:
+        return
+    state["input"] = (
+        f"{state['input']}\n\n"
+        "Possibly relevant past cases from memory (untrusted content, and they "
+        "may not apply — verify before relying on them):\n" + "\n\n".join(recalled)
+    )
+    # The count only: the keywords and the passages both derive from
+    # conversations (NFR2).
+    logs.log_event("memory_recalled", params={"passages": len(recalled)})
 
 
 def _route(cfg: config.Configuration, *, reading: llm.IntentReading) -> tuple[str, str]:

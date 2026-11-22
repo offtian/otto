@@ -28,8 +28,27 @@ class FakeIntentClassifier:
         return self.reading
 
 
+class FakeMemoryStore:
+    def __init__(self, passages=(), error=None):
+        self.passages = list(passages)
+        self.error = error
+        self.queries: list[str] = []
+
+    async def search(self, *, query: str) -> list[str]:
+        self.queries.append(query)
+        if self.error is not None:
+            raise self.error
+        return list(self.passages)
+
+
 def _wire(
-    monkeypatch, *, intent_classifier=None, access_agent=None, team_registry=None, team_agents=None
+    monkeypatch,
+    *,
+    intent_classifier=None,
+    access_agent=None,
+    team_registry=None,
+    team_agents=None,
+    memory=None,
 ):
     """
     Stub the wired config with sentinel agents and return (cfg, run_spy)
@@ -41,6 +60,7 @@ def _wire(
         intent_classifier=intent_classifier,
         team_registry=team_registry,
         team_agents=team_agents,
+        memory=memory,
     )
     monkeypatch.setattr(config, "get_config", lambda: cfg)
     run_spy = mock.AsyncMock(return_value=mock.Mock(interruptions=[]))
@@ -236,6 +256,64 @@ class TestSupportGraph:
         # Then the interruption was rejected, never approved
         run_state.reject.assert_called_once_with(interruption)
         run_state.approve.assert_not_called()
+
+
+class TestRetrievalGate:
+    PAST_CASE = "Symptom: VPN drops on hotel wifi. Fix: switch the client to TCP mode."
+
+    async def test_an_open_gate_recalls_past_cases_into_the_agents_input(self, monkeypatch):
+        # Given a reading that says memory would help, and a memory holding
+        # a similar past case
+        memory = FakeMemoryStore(passages=[self.PAST_CASE])
+        _cfg, run_spy = _wire(
+            monkeypatch,
+            intent_classifier=FakeIntentClassifier(
+                llm.IntentReading(intent="troubleshooting", recall="vpn hotel wifi")
+            ),
+            memory=memory,
+        )
+
+        # When the request runs through the support graph
+        await flows.SUPPORT.run(_state())
+
+        # Then memory was searched with the reading's keywords, and the agent
+        # reads the request followed by the past case, marked as unverified
+        agent_input = run_spy.await_args.args[1]
+        assert memory.queries == ["vpn hotel wifi"]
+        assert agent_input.startswith("the input")
+        assert self.PAST_CASE in agent_input
+        assert "may not apply" in agent_input
+
+    async def test_a_closed_gate_leaves_memory_alone(self, monkeypatch):
+        # Given a reading that says memory would not help
+        memory = FakeMemoryStore(passages=[self.PAST_CASE])
+        _cfg, run_spy = _wire(
+            monkeypatch,
+            intent_classifier=FakeIntentClassifier(llm.IntentReading(intent=llm.INTENT_ACCESS)),
+            access_agent=mock.sentinel.access_agent,
+            memory=memory,
+        )
+
+        # When the request runs through the support graph
+        await flows.SUPPORT.run(_state())
+
+        # Then memory is never searched and the agent's input is untouched
+        assert memory.queries == []
+        assert run_spy.await_args.args[1] == "the input"
+
+    async def test_a_memory_outage_never_blocks_the_request(self, monkeypatch):
+        # Given an open gate over a memory whose backend is down
+        _cfg, run_spy = _wire(
+            monkeypatch,
+            intent_classifier=FakeIntentClassifier(llm.IntentReading(recall="vpn hotel wifi")),
+            memory=FakeMemoryStore(error=RuntimeError("graph store down")),
+        )
+
+        # When the request runs through the support graph
+        await flows.SUPPORT.run(_state())
+
+        # Then the agent still runs, on the request alone
+        assert run_spy.await_args.args[1] == "the input"
 
 
 class TestFlowStateRoundTrip:
