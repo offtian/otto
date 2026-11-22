@@ -123,21 +123,20 @@ class Settings(BaseSettings):
     memory_embedding_dimensions: int = 0
     memory_dataset: str = "support_resolutions"
 
-    # Team-owned flows (flow graph): YAML of owning teams — the services
-    # they own (the routing key) and their specialist sub-agents. Missing
-    # file = no team flows; every request falls back to the access/general
-    # split.
-    team_profiles_file: str = "teams.yaml"
+    # The catalog: a YAML file of two flat lists — the specialists the
+    # general agent may consult and the repositories it may propose changes
+    # to. Missing file = neither; the agent is its built-in self.
+    otto_file: str = "otto.yaml"
 
     # Specialist MCP servers, "name:URL" pairs comma-separated — the name is
-    # what a specialist's `mcp:` field in the profiles YAML references. A
+    # what a specialist's `mcp:` field in the catalog references. A
     # specialist without a reachable server runs on instructions alone.
     specialist_mcp_urls: str = ""
     # "name:token" pairs for the servers above that need auth.
     specialist_mcp_tokens: str = ""
 
     # Repositories (GitHub): the write path for provisioning and engineering
-    # changes. With a token, the repositories teams own (profiles YAML) are
+    # changes. With a token, the catalogued repositories (otto.yaml) are
     # read and proposed against through the GitHub API — give it a GitHub
     # App installation token or a fine-grained PAT limited to those
     # repositories, Contents + Pull requests read/write. Without one, the

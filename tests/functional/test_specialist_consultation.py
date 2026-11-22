@@ -1,9 +1,8 @@
 """
-End-to-end team-owned flow: a request mentioning a team's service routes to
-that team's owner agent, which consults its specialist sub-agents (real
-nested agent-as-tool runs — the fanout) and answers at the origin. Only the
-model, the classifier, and Slack are faked; the graph, routing, owner and
-specialist agents, and the agent loop are all real.
+End-to-end specialist consultation: the general agent consults the
+catalogued specialists (real nested agent-as-tool runs — the fanout) and
+answers at the origin. Only the model and Slack are faked; the graph, the
+general and specialist agents, and the agent loop are all real.
 """
 
 import json
@@ -22,9 +21,8 @@ from otto import config
 from otto.application import support
 from otto.domain.identity import users
 from otto.domain.support import agent as support_agent
-from otto.domain.support import approvals, entities, teams
+from otto.domain.support import approvals, catalog, entities, specialists
 from otto.settings import Settings
-from otto.vendors import llm
 from otto.vendors import slack as slack_vendor
 
 
@@ -50,7 +48,7 @@ def _tool_call(name: str, arguments: dict):
 
 class ScriptedModel(Model):
     """
-    Deterministic model shared by owner and specialists: returns the
+    Deterministic model shared by the agent and its specialists: returns the
     scripted turns in order and records the instructions of every agent
     that called it.
     """
@@ -104,36 +102,19 @@ class FakeSlackGateway:
         return list(self.thread)[-limit:]
 
 
-class FakeIntentClassifier:
-    def __init__(self, reading):
-        self.reading = reading
-
-    async def classify(self, *, text):
-        return self.reading
-
-
-REGISTRY = teams.TeamRegistry(
-    teams=(
-        teams.TeamProfile(
-            name="platform",
-            description="Owns Coder and CI",
-            instructions="You own developer-platform issues.",
-            services=("coder", "jenkins"),
-            specialists=("coder", "jenkins"),
-        ),
-    ),
-    specialists={
-        "coder": teams.SpecialistProfile(
+CATALOG = catalog.Catalog(
+    specialists=(
+        specialists.SpecialistProfile(
             name="coder",
             description="Reads Coder workspaces and templates.",
             instructions="You are the Coder specialist.",
         ),
-        "jenkins": teams.SpecialistProfile(
+        specialists.SpecialistProfile(
             name="jenkins",
             description="Reads Jenkins jobs and builds.",
             instructions="You are the Jenkins specialist.",
         ),
-    },
+    ),
 )
 
 ORIGIN = entities.SlackThread(channel_id="D1", thread_ts="1.0")
@@ -144,14 +125,18 @@ SPECIALIST_FINDING = "The template pins a deprecated base image."
 @pytest.fixture
 def wire(monkeypatch):
     """
-    Wire a full Configuration around a scripted model, the example team
-    registry, and a classifier that routes to the platform team.
+    Wire a full Configuration around a scripted model whose general agent
+    carries the catalogued specialists; return (gateway, agent).
     """
 
-    def _wire(model, reading):
+    def _wire(model):
         gateway = FakeSlackGateway()
-        team_agents = teams.build_team_agents(
-            registry=REGISTRY, model=model, specialist_mcp_tools={}
+        agent = catalog.mount(
+            support_agent.build_agent(model=model),
+            catalog=CATALOG,
+            model=model,
+            specialist_mcp_tools={},
+            repo_host=None,
         )
         cfg = config.Configuration(
             settings=Settings(
@@ -167,14 +152,11 @@ def wire(monkeypatch):
             model=model,
             confluence_mcp=None,
             sailpoint_mcp=None,
-            agent=support_agent.build_agent(model=model),
-            access_agent=support_agent.build_access_agent(model=model),
-            intent_classifier=FakeIntentClassifier(reading),
-            team_registry=REGISTRY,
-            team_agents=team_agents,
+            agent=agent,
+            catalog=CATALOG,
         )
         monkeypatch.setattr(config, "get_config", lambda: cfg)
-        return cfg, gateway, team_agents
+        return gateway, agent
 
     return _wire
 
@@ -185,13 +167,9 @@ async def _submit_request(text="My Coder template build keeps failing"):
     return request
 
 
-TROUBLESHOOTING_CODER = llm.IntentReading(intent="troubleshooting", services=("coder",))
-
-
-class TestTeamOwnedTroubleshooting:
-    async def test_the_owning_team_agent_consults_its_specialist(self, wire):
-        # Given a request routed to platform whose owner consults the Coder
-        # specialist once, then answers
+class TestSpecialistConsultation:
+    async def test_the_agent_consults_a_specialist_and_answers_from_its_finding(self, wire):
+        # Given an agent that consults the Coder specialist once, then answers
         model = ScriptedModel(
             [
                 [_tool_call("consult_coder", {"input": "Why does the template build fail?"})],
@@ -199,19 +177,18 @@ class TestTeamOwnedTroubleshooting:
                 [_text("Your template pins a deprecated image — bump the base image.")],
             ]
         )
-        _cfg, gateway, team_agents = wire(model, TROUBLESHOOTING_CODER)
+        gateway, agent = wire(model)
 
         # When the request is handled
         await _submit_request()
 
-        # Then the owner ran first, the nested specialist run really executed,
-        # and the owner spoke last — three model calls, two agents
-        owner_instructions = str(team_agents["platform"].instructions)
-        assert model.system_instructions[0] == owner_instructions
+        # Then the agent ran first, the nested specialist run really executed,
+        # and the agent spoke last — three model calls, two agents
+        assert model.system_instructions[0] == str(agent.instructions)
         assert "Coder specialist" in str(model.system_instructions[1])
-        assert model.system_instructions[2] == owner_instructions
+        assert model.system_instructions[2] == str(agent.instructions)
 
-        # Then the specialist's finding fed back into the owner's context
+        # Then the specialist's finding fed back into the agent's context
         assert SPECIALIST_FINDING in json.dumps(model.inputs[-1], default=str)
 
         # Then the final answer lands at the origin with a feedback vote
@@ -219,8 +196,8 @@ class TestTeamOwnedTroubleshooting:
         assert (channel, thread_ts) == ("D1", "1.0")
         assert "deprecated image" in text
 
-    async def test_the_owner_fans_out_to_several_specialists_in_one_turn(self, wire):
-        # Given an owner that consults both specialists in a single turn (the
+    async def test_the_agent_fans_out_to_several_specialists_in_one_turn(self, wire):
+        # Given an agent that consults both specialists in a single turn (the
         # SDK runs same-turn tool calls concurrently, so both replies are
         # scripted identically to stay order-independent)
         model = ScriptedModel(
@@ -234,31 +211,15 @@ class TestTeamOwnedTroubleshooting:
                 [_text("Both point at the template's base image.")],
             ]
         )
-        _cfg, gateway, _team_agents = wire(
-            model, llm.IntentReading(intent="troubleshooting", services=("coder", "jenkins"))
-        )
+        gateway, _agent = wire(model)
 
         # When the request is handled
         await _submit_request()
 
-        # Then both specialist agents really ran between the owner's turns
+        # Then both specialist agents really ran between the agent's turns
         consulted = {str(instructions) for instructions in model.system_instructions[1:3]}
         assert any("Coder specialist" in instructions for instructions in consulted)
         assert any("Jenkins specialist" in instructions for instructions in consulted)
 
         # Then the synthesized answer lands at the origin
         assert "base image" in gateway.answers[0][2]
-
-    async def test_an_unowned_service_still_gets_the_general_agent(self, wire):
-        # Given a reading whose service no team owns
-        model = ScriptedModel([[_text("Restart the VPN client.")]])
-        _cfg, gateway, _team_agents = wire(
-            model, llm.IntentReading(intent="troubleshooting", services=("vpn",))
-        )
-
-        # When the request is handled
-        await _submit_request(text="VPN keeps dropping")
-
-        # Then the general agent answered — team flows never remove capability
-        assert model.system_instructions[0] == support_agent.INSTRUCTIONS
-        assert gateway.answers

@@ -26,13 +26,13 @@ from otto.data import db
 from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals as support_approvals
+from otto.domain.support import catalog as support_catalog
 from otto.domain.support import changes as support_changes
 from otto.domain.support import followups as support_followups
 from otto.domain.support import inbox as support_inbox
 from otto.domain.support import memory as support_memory
 from otto.domain.support import outbox as support_outbox
 from otto.domain.support import policy as support_policy
-from otto.domain.support import teams as support_teams
 from otto.settings import Settings, settings
 from otto.utils import logs
 from otto.vendors import cognee as cognee_vendor
@@ -102,21 +102,21 @@ class Configuration(pydantic.BaseModel):
     # Routes each inbound request to a flow-graph node; None = no routing,
     # every request runs the general agent, exactly the pre-graph behavior.
     intent_classifier: pydantic.SkipValidation[llm.LLMIntentClassifier | None] = None
-    # Team-owned flows: the profiles registry (data, loaded at get_config),
-    # the read-only specialist MCP mounts, and one owner agent per team
-    # (built by load_agents once the MCP servers are connected). None/empty
-    # = no team flows; requests fall back to the access/general split.
-    team_registry: pydantic.SkipValidation[support_teams.TeamRegistry | None] = None
+    # The catalog (otto.yaml, loaded at get_config): the specialists the
+    # general agent may consult and the repositories it may propose changes
+    # to, plus the read-only MCP mounts of the specialists that have one.
+    # load_agents mounts them onto the general agent once the MCP servers
+    # are connected. Empty = the agent is its built-in self.
+    catalog: pydantic.SkipValidation[support_catalog.Catalog] = support_catalog.Catalog()
     specialist_mcps: pydantic.SkipValidation[dict[str, mcp.MCPServerMount] | None] = None
-    team_agents: pydantic.SkipValidation[dict[str, _Agent] | None] = None
     # Long-term memory (Cognee) — None = disabled; the search_memory tool
     # and the resolution-ingest hook both degrade to no-ops.
     memory: pydantic.SkipValidation[support_memory.MemoryStore | None] = None
     # Consolidation: what of a resolved conversation gets remembered. Wired
     # with memory; None = the conversation is remembered as it stands.
     case_distiller: pydantic.SkipValidation[support_memory.CaseDistiller | None] = None
-    # Where team-owned repositories are read and proposed against; None =
-    # no repository tools mount on any owner agent.
+    # Where the catalogued repositories are read and proposed against;
+    # None = no repository tools mount.
     repo_host: pydantic.SkipValidation[support_changes.RepoHost | None] = None
 
     def load_memory(self) -> None:
@@ -150,26 +150,24 @@ class Configuration(pydantic.BaseModel):
         """
         confluence_tools = await _mounted_tools(self.confluence_mcp)
         sailpoint_tools = await _mounted_tools(self.sailpoint_mcp)
-        self.agent = support_agent.build_agent(
+        self.agent = support_catalog.mount(
+            support_agent.build_agent(
+                model=self.model,
+                confluence_tools=confluence_tools,
+                sailpoint_tools=sailpoint_tools,
+            ),
+            catalog=self.catalog,
             model=self.model,
-            confluence_tools=confluence_tools,
-            sailpoint_tools=sailpoint_tools,
+            specialist_mcp_tools={
+                name: (await _mounted_tools(mount)) or []
+                for name, mount in (self.specialist_mcps or {}).items()
+            },
+            repo_host=self.repo_host,
         )
         self.access_agent = support_agent.build_access_agent(
             model=self.model,
             confluence_tools=confluence_tools,
             sailpoint_tools=sailpoint_tools,
-        )
-        specialist_tools = {
-            name: (await _mounted_tools(mount)) or []
-            for name, mount in (self.specialist_mcps or {}).items()
-        }
-        self.team_agents = support_teams.build_team_agents(
-            registry=self.team_registry or support_teams.TeamRegistry(),
-            model=self.model,
-            specialist_mcp_tools=specialist_tools,
-            confluence_tools=confluence_tools,
-            repo_host=self.repo_host,
         )
 
     def load_model(self) -> None:
@@ -287,29 +285,26 @@ class Configuration(pydantic.BaseModel):
         urls = self.settings.specialist_mcp_url_map
         tokens = self.settings.specialist_mcp_token_map
         self.specialist_mcps = {
-            name: mcp.build_mount(
+            profile.name: mcp.build_mount(
                 spec=mcp.MCPSpec(
-                    name=name,
+                    name=profile.name,
                     url=urls[profile.mcp],
                     token=tokens.get(profile.mcp, ""),
                     allowed_tools=profile.tools,
                     ungated_tools=frozenset(profile.tools),
                 )
             )
-            for name, profile in (
-                self.team_registry or support_teams.TeamRegistry()
-            ).specialists.items()
+            for profile in self.catalog.specialists
             if profile.mcp and profile.mcp in urls and profile.tools
         }
 
-    def load_teams(self) -> None:
+    def load_catalog(self) -> None:
         """
-        Load the team-profile registry — data only; the owner agents build in
-        ``load_agents()`` once the specialist MCP servers are connected.
+        Load the catalog — data only; its specialists and repositories mount
+        onto the general agent in ``load_agents()``, once the specialist MCP
+        servers are connected.
         """
-        self.team_registry = support_teams.load_registry(
-            pathlib.Path(self.settings.team_profiles_file)
-        )
+        self.catalog = support_catalog.load_catalog(pathlib.Path(self.settings.otto_file))
 
 
 def build_repo_host(settings_: Settings) -> support_changes.RepoHost | None:
@@ -354,7 +349,7 @@ def get_config() -> Configuration:
     config.load_model()
     config.load_vendors()
     config.load_stores()
-    config.load_teams()
+    config.load_catalog()
     config.load_mcps()
     config.load_memory()
     return config

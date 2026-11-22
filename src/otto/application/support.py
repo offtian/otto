@@ -44,7 +44,6 @@ async def handle_support_request(*, request: entities.SupportRequest) -> None:
             request=request,
             result=outcome.payload,
             node=outcome.node,
-            graph_state=flows.dump_state(state),
             cfg=cfg,
         )
     else:
@@ -120,7 +119,6 @@ async def resolve_approval(*, approval_id: str, resolver_id: str, approved: bool
             request=_request_from(pending),
             result=outcome.payload,
             node=outcome.node,
-            graph_state=pending.graph_state_json,
             cfg=cfg,
             channel=pending.channel,
         )
@@ -393,7 +391,6 @@ async def recover_approvals() -> None:
                     request=_request_from(pending),
                     result=outcome.payload,
                     node=outcome.node,
-                    graph_state=pending.graph_state_json,
                     cfg=cfg,
                     channel=pending.channel,
                 )
@@ -529,7 +526,6 @@ async def _pause_for_approval(
     request: entities.SupportRequest,
     result: agents.RunResult,
     node: str,
-    graph_state: str,
     cfg: config.Configuration,
     channel: str = "slack",
 ) -> None:
@@ -575,7 +571,6 @@ async def _pause_for_approval(
         tool_arguments=tool_arguments,
         run_state_json=result.to_state().to_string(),
         node=node,
-        graph_state_json=graph_state,
         channel=channel,
     )
     requester = await _requester_label(
@@ -617,19 +612,20 @@ async def _resume_run(
     Re-enter the support graph at the node that suspended for this approval,
     with the human decision applied to the paused run state.
     """
-    state: graph.State = flows.load_state(pending.graph_state_json)
-    state.update(
-        {
-            "text": pending.request_text,
-            "resume": {"run_state_json": pending.run_state_json, "approved": approved},
-            "ctx": _build_context(
-                requester_id=pending.requester_id,
-                origin=pending.origin,
-                cfg=cfg,
-            ),
-        }
-    )
-    return await flows.SUPPORT.run(state, entry=pending.node)
+    state: graph.State = {
+        "text": pending.request_text,
+        "resume": {"run_state_json": pending.run_state_json, "approved": approved},
+        "ctx": _build_context(
+            requester_id=pending.requester_id,
+            origin=pending.origin,
+            cfg=cfg,
+        ),
+    }
+    # A pause can outlive the graph's shape: an approval suspended at a node
+    # that no longer exists (the per-team "owner" nodes) resumes on the
+    # general agent rather than dropping the human's decision.
+    entry = pending.node if pending.node in flows.SUPPORT.nodes else flows.GENERAL
+    return await flows.SUPPORT.run(state, entry=entry)
 
 
 async def _remember_resolution(*, origin: entities.Origin, cfg: config.Configuration) -> None:

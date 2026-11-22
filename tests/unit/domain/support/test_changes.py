@@ -215,8 +215,8 @@ class TestRepoTools:
         assert "+  ai            = { cpu = 32, memory = 64, disk = 200 }" in diff
         assert host.pull_requests == []
 
-    async def test_refuses_a_repository_the_team_does_not_own(self):
-        # Given the tools of a team that owns only acme/infra-live
+    async def test_refuses_a_repository_that_is_not_in_the_catalog(self):
+        # Given the tools over a catalog that lists only acme/infra-live
         arguments = {"repo": "acme/payroll", "path": "README.md"}
 
         # When the agent reads from another repository

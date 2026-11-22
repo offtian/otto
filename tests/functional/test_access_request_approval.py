@@ -1060,9 +1060,7 @@ class TestIntentRouting:
         model = ScriptedModel([[_text("Try restarting the VPN client.")]])
         _cfg, _gateway, model = wire(
             model,
-            intent_classifier=FakeIntentClassifier(
-                llm.IntentReading(intent="troubleshooting", services=("vpn",))
-            ),
+            intent_classifier=FakeIntentClassifier(llm.IntentReading(intent="troubleshooting")),
             access_agent=support_agent.build_access_agent(model=model),
         )
 
