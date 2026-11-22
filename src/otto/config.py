@@ -118,6 +118,9 @@ class Configuration(pydantic.BaseModel):
     # Where the catalogued repositories are read and proposed against;
     # None = no repository tools mount.
     repo_host: pydantic.SkipValidation[support_changes.RepoHost | None] = None
+    # An independent second opinion on a proposed change, shown to the
+    # approver under the card; None = the approver gets the edits alone.
+    change_reviewer: pydantic.SkipValidation[support_changes.ChangeReviewer | None] = None
 
     def load_memory(self) -> None:
         """

@@ -16,8 +16,11 @@ nobody saw. Only the paths a repository's profile allows can be touched.
 All three rules are checked in code, when a change is previewed and again
 when it is applied — never left to the model.
 
-``RepoHost`` is the port to wherever repositories live: GitHub
+Two ports. ``RepoHost`` is wherever repositories live: GitHub
 (``vendors/github``), or a local directory (``LocalRepoHost``) in dev.
+``ChangeReviewer`` is an independent second opinion on a staged change,
+shown to the approver beside the card — advisory only: it never approves,
+blocks or alters anything.
 """
 
 import difflib
@@ -139,6 +142,39 @@ class RepoHost(Protocol):
         ...
 
 
+@attrs.frozen
+class Review:
+    """
+    A second opinion on a staged change, for the human who decides.
+    """
+
+    approves: bool
+    # What the approver should look at twice, most important first.
+    findings: tuple[str, ...] = ()
+    # Who gave it (a model name) — shown with the verdict, so the approver
+    # knows what they are reading.
+    reviewer: str = ""
+
+
+class ChangeReviewer(Protocol):
+    """
+    A second pair of eyes on a proposed change, independent of the agent
+    that wrote it.
+    """
+
+    async def review(
+        self, *, profile: RepoProfile, title: str, summary: str, files: Sequence[StagedFile]
+    ) -> Review:
+        """
+        Return an opinion on a staged change: whether it does what its title
+        and summary say, and what the approver should look at twice.
+
+        May raise or take a while — the caller treats a failed review as no
+        review and never lets it hold up the approval.
+        """
+        ...
+
+
 def apply_edit(*, content: str | None, edit: FileEdit) -> str:
     """
     Return a file's content with one edit applied.
@@ -190,6 +226,30 @@ async def stage(
         current = after.get(path, before[path])
         after[path] = apply_edit(content=current, edit=attrs.evolve(edit, path=path))
     return [StagedFile(path=path, before=before[path], after=after[path]) for path in after]
+
+
+async def stage_proposal(
+    *, host: RepoHost, profiles: Mapping[str, RepoProfile], arguments: Mapping[str, Any]
+) -> tuple[RepoProfile, list[StagedFile]]:
+    """
+    Return the repository profile and staged files of an ``open_pull_request``
+    proposal — the one check of whether it may and can be applied, run when
+    the approver is asked and again when the approved call executes.
+
+    :raises EditRejected: if the repository is not catalogued, the proposal
+        is too long to show in full on its approval card, a path is outside
+        the allowlist, or an edit does not apply.
+    """
+    repo = str(arguments.get("repo", ""))
+    if repo not in profiles:
+        raise EditRejected(
+            f"{repo!r} is not a repository you may work in — use one of: " + ", ".join(profiles)
+        )
+    ensure_reviewable(arguments)
+    staged = await stage(
+        host=host, profile=profiles[repo], edits=_edits(arguments.get("edits") or [])
+    )
+    return profiles[repo], staged
 
 
 def render_diff(files: Sequence[StagedFile]) -> str:
@@ -267,6 +327,32 @@ def _fenced(text: object) -> str:
     end the block early and let an edit dress the rest of the card up.
     """
     return str(text or "").replace("```", "`\u200b`\u200b`")
+
+
+# The most findings, and the most of each, a second opinion shows.
+_MAX_FINDINGS = 5
+_FINDING_LIMIT = 300
+
+
+def render_review(review: Review) -> str:
+    """
+    Render a second opinion as mrkdwn for the approver. Findings are a
+    model's words about untrusted content, so they are shown as plain text:
+    nothing in them can mention a channel or pose as a link.
+    """
+    reviewer = f" ({_plain(review.reviewer)})" if review.reviewer else ""
+    if review.approves and not review.findings:
+        return f":mag: *Second opinion*{reviewer}: no concerns with this change."
+    verdict = "no objection, with notes" if review.approves else "look twice before approving"
+    findings = "\n".join(
+        f"• {_plain(finding)[:_FINDING_LIMIT]}" for finding in review.findings[:_MAX_FINDINGS]
+    )
+    icon = ":mag:" if review.approves else ":warning:"
+    return f"{icon} *Second opinion*{reviewer}: {verdict}.\n{findings}"
+
+
+def _plain(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def pull_request_body(*, summary: str, context: support_agent.SupportContext) -> str:
@@ -422,8 +508,9 @@ class RepoTools:
         return content
 
     async def _preview(self, *, repo: str, edits: Sequence[Mapping[str, Any]]) -> str:
-        ensure_reviewable({"repo": repo, "edits": edits})
-        staged = await stage(host=self.host, profile=self._profile(repo), edits=_edits(edits))
+        _, staged = await stage_proposal(
+            host=self.host, profiles=self.profiles, arguments={"repo": repo, "edits": edits}
+        )
         return render_diff(staged)
 
     async def _open(
@@ -435,9 +522,11 @@ class RepoTools:
         summary: str,
         edits: Sequence[Mapping[str, Any]],
     ) -> str:
-        profile = self._profile(repo)
-        ensure_reviewable({"repo": repo, "title": title, "summary": summary, "edits": edits})
-        staged = await stage(host=self.host, profile=profile, edits=_edits(edits))
+        profile, staged = await stage_proposal(
+            host=self.host,
+            profiles=self.profiles,
+            arguments={"repo": repo, "title": title, "summary": summary, "edits": edits},
+        )
         url = await self.host.open_pull_request(
             repo=profile.name,
             base=profile.base,

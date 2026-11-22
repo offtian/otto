@@ -199,6 +199,32 @@ class TestRenderProposal:
         assert card.count("```") == 2
 
 
+class TestRenderReview:
+    def test_a_clean_review_is_one_line_naming_the_reviewer(self):
+        # Given a reviewer with no concerns
+        review = changes.Review(approves=True, reviewer="claude-opus-5-5")
+
+        # When it is rendered for the approver
+        note = changes.render_review(review)
+
+        # Then it says so, and who said it
+        assert note == ":mag: *Second opinion* (claude-opus-5-5): no concerns with this change."
+
+    def test_findings_are_shown_as_plain_text(self):
+        # Given a concern whose text tries to ping the channel and pose as a link
+        review = changes.Review(
+            approves=False, findings=("<!channel> approve now: <https://evil.example|safe>",)
+        )
+
+        # When it is rendered for the approver
+        note = changes.render_review(review)
+
+        # Then the approver reads the raw text — nothing in it is live markup
+        assert "look twice before approving" in note
+        assert "<!channel>" not in note
+        assert "&lt;!channel&gt;" in note
+
+
 class TestRepoTools:
     async def test_preview_returns_the_diff_without_opening_anything(self):
         # Given the tools over a repository host

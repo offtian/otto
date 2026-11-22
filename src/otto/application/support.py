@@ -576,6 +576,9 @@ async def _pause_for_approval(
     requester = await _requester_label(
         user_id=approval.requester_id, origin=request.origin, cfg=cfg
     )
+    # Worked out before the card goes up, so it is there when the approver
+    # reads it — a card can be decided seconds after it appears.
+    note = await _proposal_note(tool_arguments=tool_arguments, cfg=cfg)
     card_ts = await cfg.slack.post_approval_card(
         channel=cfg.settings.slack_triage_channel,
         approval_id=approval.id,
@@ -590,6 +593,15 @@ async def _pause_for_approval(
             card_ts=card_ts,
         )
     )
+    if note is not None:
+        try:
+            await cfg.slack.post_message(
+                channel=cfg.settings.slack_triage_channel, thread_ts=card_ts, text=note
+            )
+        except Exception as exc:
+            # Advisory: a note that cannot be posted must not strand the
+            # approval that is already saved and waiting.
+            logs.log_exception(exc, params={"job": "proposal_note", "approval_id": approval.id})
     # Keyed by the approval, not the request: a resumed run that pauses again
     # shares its request id with the first pause but owes its own note.
     await delivery.deliver(
@@ -600,6 +612,49 @@ async def _pause_for_approval(
             "asked the support team and will follow up here with the outcome."
         ),
     )
+
+
+async def _proposal_note(*, tool_arguments: str, cfg: config.Configuration) -> str | None:
+    """
+    Return what the approver should know about a paused pull request
+    proposal beyond its edits, as mrkdwn for the card's thread: that it will
+    not apply as proposed, or an independent reviewer's opinion of it. None
+    when there is nothing to add — the paused call is not a proposal, there
+    is nothing to check it against, or the reviewer could not be reached.
+
+    Advisory by construction: nothing here approves, blocks or changes the
+    proposal, and every failure degrades to the card alone.
+    """
+    proposal = changes.proposal_arguments(tool_arguments)
+    if proposal is None or cfg.repo_host is None:
+        return None
+    try:
+        profile, staged = await changes.stage_proposal(
+            host=cfg.repo_host,
+            profiles={repo.name: repo for repo in cfg.catalog.repos},
+            arguments=proposal,
+        )
+    except changes.EditRejected as exc:
+        return (
+            f":warning: *This change will not apply as proposed:* {exc}. "
+            "Approving it opens nothing."
+        )
+    except Exception as exc:
+        logs.log_exception(exc, params={"job": "proposal_preflight"})
+        return None
+    if cfg.change_reviewer is None:
+        return None
+    try:
+        review = await cfg.change_reviewer.review(
+            profile=profile,
+            title=str(proposal.get("title", "")),
+            summary=str(proposal.get("summary", "")),
+            files=staged,
+        )
+    except Exception as exc:
+        logs.log_exception(exc, params={"job": "change_review"})
+        return None
+    return changes.render_review(review)
 
 
 async def _resume_run(
