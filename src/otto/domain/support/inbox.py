@@ -7,9 +7,13 @@ dropping it silently (FR8).
 
 Rows exist only while a request is in flight: the request text is
 conversation content and is not kept at rest once the request is handled.
+
+``Inbox`` is the port the application talks to; ``PostgresInbox`` is its one
+implementation today.
 """
 
 from datetime import datetime
+from typing import Protocol
 
 import attrs
 import databases
@@ -20,6 +24,41 @@ from otto.data import models
 from otto.domain.support import entities
 
 
+class Inbox(Protocol):
+    """
+    Inbound requests in flight. Every method may raise on a store outage;
+    callers decide whether that is fatal (``dispatch`` fails open).
+    """
+
+    async def accept(self, request: entities.SupportRequest) -> bool:
+        """
+        Record the request and return True, or return False when it is
+        already recorded — a redelivery of a request still being handled.
+        Atomic: two deliveries of one request can never both be accepted.
+        """
+        ...
+
+    async def finish(self, request_id: str) -> None:
+        """
+        Remove a request whose handler has finished. Unknown ids are ignored.
+        """
+        ...
+
+    async def discard_stale(self, *, cutoff: datetime) -> int:
+        """
+        Remove the unfinished requests received before ``cutoff`` — too old
+        to answer usefully — and return how many were removed.
+        """
+        ...
+
+    async def list_unfinished(self) -> list[entities.SupportRequest]:
+        """
+        Return the requests that were accepted but never finished, oldest
+        first.
+        """
+        ...
+
+
 # SQLModel exposes the SQLAlchemy Table at runtime; mypy needs the hint.
 _TABLE: sa.Table = models.InboundRequestRecord.__table__  # type: ignore[attr-defined]
 
@@ -27,19 +66,14 @@ _TABLE: sa.Table = models.InboundRequestRecord.__table__  # type: ignore[attr-de
 @attrs.frozen
 class PostgresInbox:
     """
-    Inbound requests in flight, over Postgres. The primary key is the
-    channel's own delivery id, so ``accept`` is an atomic insert-if-absent:
-    a redelivery of an in-flight request is refused on every replica and
-    across restarts.
+    ``Inbox`` over Postgres. The primary key is the channel's own delivery
+    id, so ``accept`` is one insert-if-absent statement: a redelivery of an
+    in-flight request is refused on every replica and across restarts.
     """
 
     database: databases.Database
 
     async def accept(self, request: entities.SupportRequest) -> bool:
-        """
-        Record the request and return True, or return False when it is
-        already recorded — a redelivery of a request still being handled.
-        """
         inserted = await self.database.fetch_one(
             pg.insert(_TABLE)
             .values(
@@ -55,26 +89,15 @@ class PostgresInbox:
         return inserted is not None
 
     async def finish(self, request_id: str) -> None:
-        """
-        Remove a request whose handler has finished.
-        """
         await self.database.execute(sa.delete(_TABLE).where(_TABLE.c.id == request_id))
 
     async def discard_stale(self, *, cutoff: datetime) -> int:
-        """
-        Remove the unfinished requests received before ``cutoff`` — too old
-        to answer usefully — and return how many were removed.
-        """
         rows = await self.database.fetch_all(
             sa.delete(_TABLE).where(_TABLE.c.received_at < cutoff).returning(_TABLE.c.id)
         )
         return len(rows)
 
     async def list_unfinished(self) -> list[entities.SupportRequest]:
-        """
-        Return the requests that were accepted but never finished, oldest
-        first.
-        """
         rows = await self.database.fetch_all(sa.select(_TABLE).order_by(_TABLE.c.received_at))
         return [
             entities.SupportRequest(
