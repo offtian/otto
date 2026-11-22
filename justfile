@@ -63,9 +63,16 @@ test *ARGS:
 test-unit *ARGS:
     uv run pytest tests/unit/ -x -vv {{ ARGS }}
 
-# Run integration tests (needs `just infra` Postgres + migrations applied)
+# The scratch database the integration tests run in. They empty the tables
+# they use, so they are never pointed at the dev one.
+test_database_url := "postgresql+asyncpg://postgres@localhost:5432/otto_test"
+
+# Run integration tests in a scratch database, created and migrated here
+# (needs `just infra`; the sandbox tests also need a running Docker daemon)
 test-integration *ARGS:
-    RUN_INTEGRATION=1 uv run pytest tests/integration/ -x -vv {{ ARGS }}
+    docker compose exec -T postgres createdb -U postgres otto_test 2>/dev/null || true
+    DATABASE_URL={{ test_database_url }} PYTHONPATH=src uv run python -m alembic -c src/otto/data/alembic.ini upgrade head
+    RUN_INTEGRATION=1 DATABASE_URL={{ test_database_url }} uv run pytest tests/integration/ -x -vv {{ ARGS }}
 
 # Run functional / end-to-end tests
 test-functional *ARGS:
