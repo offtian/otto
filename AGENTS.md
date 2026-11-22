@@ -96,6 +96,11 @@ router → dispatch.accept → dispatch.handle_safely → flows.SUPPORT → deli
   not start a run on a conversation any other way.
 - **The always-on stores are assists, not gates.** Inbox, outbox, follow-ups
   and memory fail open: log the error and carry on without them.
+- **Memory holds case notes, never transcripts.** The only way in is
+  consolidation on a confirmed resolution: the conversation is distilled into
+  a de-identified note, or confirms one memory already holds. Notes are found
+  by keyword (Postgres full-text search, no embeddings) and reach an agent —
+  through the retrieval gate or `search_memory` — framed as untrusted.
 - **Anything that makes Otto speak on its own** — reply retries, follow-ups,
   startup replay — checks the kill switch first.
 - **Approval-gated tools mount only on top-level agents.** Specialists and the

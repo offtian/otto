@@ -6,7 +6,7 @@ loop, RunState serialization (NFR6), store, and use-cases are all real.
 """
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 import attrs
@@ -25,6 +25,7 @@ from otto.application import support
 from otto.domain.identity import users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals, entities
+from otto.domain.support import memory as support_memory
 from otto.settings import Settings
 from otto.vendors import llm
 from otto.vendors import slack as slack_vendor
@@ -163,6 +164,17 @@ class FakeJiraGateway:
 
 ORIGIN = entities.SlackThread(channel_id="D1", thread_ts="1.0")
 TICKET_ORIGIN = entities.TicketRef(issue_key="IT-7")
+RESOLVED_THREAD = (
+    ("U_REQ", "My VPN fails on hotel wifi"),
+    ("otto", "Restart the client and rejoin the network."),
+    ("U_REQ", "That fixed it, thanks!"),
+)
+KNOWN_CASE = support_memory.Memory(
+    id=12,
+    note="Symptom: VPN drops on hotel wifi. Fix: restart the client.",
+    times_seen=2,
+    last_seen=datetime(2026, 11, 1, tzinfo=UTC),
+)
 
 
 @pytest.fixture
@@ -525,42 +537,42 @@ class TestKnowledgeAnswerFeedback:
         )
         assert any(channel == "D1" and "helped" in text for channel, _, text in gateway.messages)
 
-    async def test_a_yes_vote_ingests_the_conversation_into_memory(self, wire):
-        # Given a wired memory store and a resolved thread with history
-        memory = FakeMemoryStore()
-        _cfg, gateway, _ = wire(ScriptedModel([]), memory=memory)
-        gateway.thread = [
-            ("U_REQ", "My VPN fails on hotel wifi"),
-            ("otto", "Restart the client and rejoin the network."),
-            ("U_REQ", "That fixed it, thanks!"),
-        ]
-
-        # When the requester votes that the answer helped
-        await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
-
-        # Then the resolved transcript landed in long-term memory
-        assert len(memory.ingested) == 1
-        assert "Restart the client" in memory.ingested[0]
-
     async def test_a_yes_vote_remembers_the_distilled_case_not_the_transcript(self, wire):
-        # Given a memory store fed by a case distiller, and a resolved thread
+        # Given a memory fed by a case distiller, and a resolved thread
         memory = FakeMemoryStore()
         distiller = mock.AsyncMock()
-        distiller.distill.return_value = "Symptom: VPN drops. Fix: restart the client."
+        distiller.distill.return_value = support_memory.CaseNote(
+            note="Symptom: VPN drops. Fix: restart the client."
+        )
         _cfg, gateway, _ = wire(ScriptedModel([]), memory=memory, case_distiller=distiller)
-        gateway.thread = [
-            ("U_REQ", "My VPN fails on hotel wifi"),
-            ("otto", "Restart the client and rejoin the network."),
-            ("U_REQ", "That fixed it, thanks!"),
-        ]
+        gateway.thread = list(RESOLVED_THREAD)
 
         # When the requester votes that the answer helped
         await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
 
-        # Then memory holds the case note, and nothing of who said what
-        (remembered,) = memory.ingested
-        assert "Symptom: VPN drops. Fix: restart the client." in remembered
-        assert "U_REQ" not in remembered
+        # Then memory was searched with the opening message for cases it
+        # already knows, and now holds the case note — nothing of who said what
+        assert memory.queries == ["My VPN fails on hotel wifi"]
+        assert memory.remembered == ["Symptom: VPN drops. Fix: restart the client."]
+        assert memory.confirmed == []
+
+    async def test_a_case_memory_already_knows_is_confirmed_not_remembered_twice(self, wire):
+        # Given a memory that already holds this fix, and a distiller that
+        # recognizes the resolved conversation as that note
+        memory = FakeMemoryStore(known=[KNOWN_CASE])
+        distiller = mock.AsyncMock()
+        distiller.distill.return_value = support_memory.CaseNote(restates=KNOWN_CASE.id)
+        _cfg, gateway, _ = wire(ScriptedModel([]), memory=memory, case_distiller=distiller)
+        gateway.thread = list(RESOLVED_THREAD)
+
+        # When the requester votes that the answer helped
+        await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
+
+        # Then the distiller was shown the known note, and that note counts
+        # one more sighting instead of gaining a copy
+        assert distiller.distill.await_args.kwargs["known"] == [KNOWN_CASE]
+        assert memory.confirmed == [KNOWN_CASE.id]
+        assert memory.remembered == []
 
     async def test_a_conversation_with_nothing_reusable_is_not_remembered(self, wire):
         # Given a case distiller that finds nothing worth keeping
@@ -574,13 +586,28 @@ class TestKnowledgeAnswerFeedback:
         await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
 
         # Then nothing is remembered, and the vote is still confirmed
-        assert memory.ingested == []
+        assert memory.remembered == []
+        assert memory.confirmed == []
         assert any(channel == "D1" and "helped" in text for channel, _, text in gateway.messages)
 
-    async def test_a_memory_outage_never_fails_the_vote(self, wire):
-        # Given a memory store whose backend is down
-        memory = FakeMemoryStore(error=RuntimeError("graph store down"))
+    async def test_a_yes_vote_remembers_nothing_without_a_distiller(self, wire):
+        # Given a memory with no case distiller wired, and a resolved thread
+        memory = FakeMemoryStore()
         _cfg, gateway, _ = wire(ScriptedModel([]), memory=memory)
+        gateway.thread = list(RESOLVED_THREAD)
+
+        # When the requester votes that the answer helped
+        await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
+
+        # Then memory is left alone — a transcript is never kept as it stands
+        assert memory.queries == []
+        assert memory.remembered == []
+
+    async def test_a_memory_outage_never_fails_the_vote(self, wire):
+        # Given a memory whose database is down, and a resolved thread
+        memory = FakeMemoryStore(error=RuntimeError("database down"))
+        _cfg, gateway, _ = wire(ScriptedModel([]), memory=memory, case_distiller=mock.AsyncMock())
+        gateway.thread = list(RESOLVED_THREAD)
 
         # When the requester votes that the answer helped
         await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
@@ -770,6 +797,18 @@ class TestApprovalSweep:
         )
         assert gateway.updates == []
         assert (await cfg.approvals.get(approval_id)).status is approvals.ApprovalStatus.PENDING
+
+    async def test_a_memory_past_its_retention_is_forgotten(self, wire):
+        # Given a memory whose notes are kept for ninety days
+        memory = FakeMemoryStore()
+        wire(ScriptedModel([]), memory=memory, memory_retention_days=90)
+        now = datetime(2026, 11, 22, tzinfo=UTC)
+
+        # When the maintenance sweep runs
+        await support.sweep_approvals(now=now)
+
+        # Then every note last seen more than ninety days before is forgotten
+        assert memory.purge_cutoffs == [now - timedelta(days=90)]
 
 
 class TestAssistantMode:
@@ -1021,22 +1060,41 @@ class TestAuditTrailOfAttempts:
 
 class FakeMemoryStore:
     """
-    Records ingests; raises on both calls when an error is given.
+    Records what is searched for, remembered, confirmed and purged, and
+    answers every search with ``known``; raises on every call when an error
+    is given.
     """
 
-    def __init__(self, error=None):
+    def __init__(self, known=(), error=None):
+        self.known = list(known)
         self.error = error
-        self.ingested = []
+        self.queries = []
+        self.remembered = []
+        self.confirmed = []
+        self.purge_cutoffs = []
 
-    async def ingest(self, *, text):
+    async def remember(self, *, note):
+        self._fail_if_down()
+        self.remembered.append(note)
+        return len(self.remembered)
+
+    async def confirm(self, memory_id):
+        self._fail_if_down()
+        self.confirmed.append(memory_id)
+
+    async def search(self, *, query, limit):
+        self._fail_if_down()
+        self.queries.append(query)
+        return self.known[:limit]
+
+    async def purge(self, *, cutoff):
+        self._fail_if_down()
+        self.purge_cutoffs.append(cutoff)
+        return 0
+
+    def _fail_if_down(self):
         if self.error is not None:
             raise self.error
-        self.ingested.append(text)
-
-    async def search(self, *, query):
-        if self.error is not None:
-            raise self.error
-        return []
 
 
 class FakeIntentClassifier:

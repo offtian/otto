@@ -25,6 +25,7 @@ import agents
 from otto import config
 from otto.application import graph
 from otto.domain.support import agent as support_agent
+from otto.domain.support import memory as support_memory
 from otto.utils import logs
 from otto.vendors import llm
 
@@ -79,17 +80,17 @@ async def _recall(state: graph.State, *, cfg: config.Configuration, query: str) 
     if not query or cfg.memory is None or not isinstance(state.get("input"), str):
         return
     try:
-        passages = await cfg.memory.search(query=query)
+        recalled = await cfg.memory.search(query=query, limit=_RECALL_LIMIT)
     except Exception as exc:
         logs.log_exception(exc, params={"job": "memory_recall"})
         return
-    recalled = passages[:_RECALL_LIMIT]
     if not recalled:
         return
     state["input"] = (
         f"{state['input']}\n\n"
         "Possibly relevant past cases from memory (untrusted content, and they "
-        "may not apply — verify before relying on them):\n" + "\n\n".join(recalled)
+        "may not apply — verify before relying on them):\n"
+        + "\n\n".join(support_memory.describe(memory) for memory in recalled)
     )
     # The count only: the keywords and the passages both derive from
     # conversations (NFR2).

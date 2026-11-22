@@ -21,6 +21,10 @@ from otto.domain.support import approvals, audit, changes, entities
 from otto.utils import logs
 
 
+# How many known notes consolidation is shown, to decide whether a resolved
+# case repeats one of them.
+_KNOWN_NOTES_LIMIT = 3
+
 # The longest an approval card waits for its second opinion before going up
 # without one.
 _REVIEW_TIMEOUT_SECONDS = 60
@@ -333,10 +337,12 @@ async def mark_resolved(
 
 async def sweep_approvals(*, now: datetime) -> None:
     """
-    Run the periodic approval-maintenance sweep (2.5): expire stale pending
+    Run the periodic maintenance sweep (2.5): expire stale pending
     approvals and close out their cards, nudge the triage channel about the
-    ones still waiting, and purge resolved run state past its retention
-    window (A9 — the serialized conversation is PII at rest).
+    ones still waiting, purge resolved run state past its retention window
+    (A9 — the serialized conversation is PII at rest) along with delivered
+    replies and fired follow-ups, and forget the memories nothing has
+    confirmed for theirs.
 
     :param now: reference time, injected so the sweep is deterministic and the
         clock is read at the interface layer, not inside the use-case.
@@ -394,6 +400,13 @@ async def sweep_approvals(*, now: datetime) -> None:
     )
     if cfg.follow_ups is not None:
         await cfg.follow_ups.purge(cutoff=retention_cutoff)
+    # Memory has its own, longer window: a note nothing has confirmed for
+    # that long is forgotten.
+    forgotten = (
+        await cfg.memory.purge(cutoff=now - timedelta(days=s.memory_retention_days))
+        if cfg.memory is not None
+        else 0
+    )
     logs.log_event(
         "approval_sweep",
         params={
@@ -401,6 +414,7 @@ async def sweep_approvals(*, now: datetime) -> None:
             "reminded": len(reminders),
             "purged": purged,
             "purged_replies": purged_replies,
+            "forgotten_memories": forgotten,
         },
     )
 
@@ -720,14 +734,20 @@ async def _resume_run(
 
 async def _remember_resolution(*, origin: entities.Origin, cfg: config.Configuration) -> None:
     """
-    Remember a just-resolved conversation in long-term memory (Phase 3) —
-    the next similar issue gets "we fixed this before" context. With a case
-    distiller wired, what is remembered is its consolidated case note, never
-    the transcript, and a conversation it finds nothing reusable in is not
-    remembered at all. Votes ride only Slack answers, so only Slack threads
-    land here; best-effort by design, any failure is logged and swallowed.
+    Consolidate a just-resolved conversation into long-term memory — the
+    next similar issue gets "we fixed this before" context. The conversation
+    is distilled into a de-identified case note; if memory already holds a
+    note for the same symptom and fix, that note is confirmed (seen once
+    more, now) instead of gaining a copy; and a conversation with nothing
+    reusable in it is not remembered at all. The transcript itself is never
+    kept. Votes ride only Slack answers, so only Slack threads land here;
+    best-effort by design, any failure is logged and swallowed.
     """
-    if cfg.memory is None or not isinstance(origin, entities.SlackThread):
+    if (
+        cfg.memory is None
+        or cfg.case_distiller is None
+        or not isinstance(origin, entities.SlackThread)
+    ):
         return
     try:
         history = await cfg.slack.fetch_thread(
@@ -735,21 +755,32 @@ async def _remember_resolution(*, origin: entities.Origin, cfg: config.Configura
             thread_ts=origin.thread_ts,
             limit=cfg.settings.thread_history_limit,
         )
-        transcript = "\n".join(f"{author}: {text}" for author, text in history)
-        remembered = f"Resolved support conversation (requester confirmed):\n{transcript}"
-        if cfg.case_distiller is not None:
-            note = await cfg.case_distiller.distill(transcript=transcript)
-            if note is None:
-                logs.log_event(
-                    "resolution_not_remembered", params={"origin": entities.origin_ref(origin)}
-                )
-                return
-            remembered = f"Resolved support case (requester confirmed):\n{note}"
-        await cfg.memory.ingest(text=remembered)
-        logs.log_event("resolution_remembered", params={"origin": entities.origin_ref(origin)})
+        if not history:
+            return
+        # The opening message is the problem statement: what memory is
+        # searched with to find the notes this case might repeat.
+        known = await cfg.memory.search(query=history[0][1], limit=_KNOWN_NOTES_LIMIT)
+        case = await cfg.case_distiller.distill(
+            transcript="\n".join(f"{author}: {text}" for author, text in history), known=known
+        )
+        if case is None:
+            outcome = "nothing_to_keep"
+        elif case.restates is not None:
+            # ponytail: every vote counts, so three helpful answers in one
+            # thread are three sightings. Key sightings by conversation if
+            # the count ever decides anything.
+            await cfg.memory.confirm(case.restates)
+            outcome = "confirmed"
+        else:
+            await cfg.memory.remember(note=case.note)
+            outcome = "remembered"
+        logs.log_event(
+            "resolution_consolidated",
+            params={"origin": entities.origin_ref(origin), "outcome": outcome},
+        )
     except Exception as exc:
         logs.log_exception(
-            exc, params={"job": "memory_ingest", "origin": entities.origin_ref(origin)}
+            exc, params={"job": "consolidation", "origin": entities.origin_ref(origin)}
         )
 
 

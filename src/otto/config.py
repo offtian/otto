@@ -28,6 +28,7 @@ from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals as support_approvals
 from otto.domain.support import catalog as support_catalog
 from otto.domain.support import changes as support_changes
+from otto.domain.support import consolidation as support_consolidation
 from otto.domain.support import followups as support_followups
 from otto.domain.support import inbox as support_inbox
 from otto.domain.support import memory as support_memory
@@ -36,7 +37,6 @@ from otto.domain.support import policy as support_policy
 from otto.domain.support import reviewer as support_reviewer
 from otto.settings import Settings, settings
 from otto.utils import logs
-from otto.vendors import cognee as cognee_vendor
 from otto.vendors import github as github_vendor
 from otto.vendors import jira as jira_vendor
 from otto.vendors import llm, mcp
@@ -114,11 +114,12 @@ class Configuration(pydantic.BaseModel):
     # are connected. Empty = the agent is its built-in self.
     catalog: pydantic.SkipValidation[support_catalog.Catalog] = support_catalog.Catalog()
     specialist_mcps: pydantic.SkipValidation[dict[str, mcp.MCPServerMount] | None] = None
-    # Long-term memory (Cognee) — None = disabled; the search_memory tool
-    # and the resolution-ingest hook both degrade to no-ops.
+    # Long-term memory: case notes distilled from resolved conversations.
+    # None = disabled; the search_memory tool, the retrieval gate and
+    # consolidation all degrade to no-ops.
     memory: pydantic.SkipValidation[support_memory.MemoryStore | None] = None
-    # Consolidation: what of a resolved conversation gets remembered. Wired
-    # with memory; None = the conversation is remembered as it stands.
+    # Consolidation: decides what of a resolved conversation is remembered.
+    # Wired with memory; without it nothing is remembered.
     case_distiller: pydantic.SkipValidation[support_memory.CaseDistiller | None] = None
     # Where the catalogued repositories are read and proposed against;
     # None = no repository tools mount.
@@ -129,26 +130,14 @@ class Configuration(pydantic.BaseModel):
 
     def load_memory(self) -> None:
         """
-        Wire the Cognee memory store and the case distiller that feeds it
-        when enabled — the one deliberately lazy wiring stage: building the
-        store imports the heavy cognee package.
+        Wire long-term memory when it is enabled and there is a database to
+        keep it in: the store of case notes, and the distiller that decides
+        what goes into it, on the agents' own model.
         """
-        if not self.settings.memory_enabled:
+        if not self.settings.memory_enabled or not self.settings.database_url:
             return
-        self.memory = cognee_vendor.build_memory_store(
-            llm_base_url=self.settings.llm_base_url,
-            llm_api_key=self.settings.llm_api_key,
-            llm_model=self.settings.llm_model,
-            embedding_endpoint=self.settings.memory_embedding_endpoint,
-            embedding_model=self.settings.memory_embedding_model,
-            embedding_dimensions=self.settings.memory_embedding_dimensions,
-            dataset=self.settings.memory_dataset,
-        )
-        self.case_distiller = llm.build_case_distiller(
-            base_url=self.settings.llm_base_url,
-            api_key=self.settings.llm_api_key,
-            model_name=self.settings.llm_model,
-        )
+        self.memory = support_memory.PostgresMemoryStore(database=db.get_db())
+        self.case_distiller = support_consolidation.AgentCaseDistiller(model=self.model)
 
     async def load_agents(self) -> None:
         """
