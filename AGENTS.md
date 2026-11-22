@@ -28,10 +28,7 @@ The one sanctioned exception is the settings singleton:
 from otto.settings import settings
 ```
 
-Imports go at module top. The one sanctioned lazy import is `cognee`, inside
-`vendors/cognee.py::build_memory_store` — do not hoist it: importing Cognee at
-module load costs seconds on every start, and raises a deprecation warning the
-test suite treats as an error.
+Imports go at module top, without exception.
 
 A class field must not share its name with a module its annotation references
 (`specialists: tuple[specialists.Profile, ...] = ()` fails at import — the
