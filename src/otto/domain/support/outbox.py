@@ -5,13 +5,21 @@ instead of losing an answer that was already paid for. Delivery is tried at
 once and, on failure, again after 10 seconds, 1 minute, 10 minutes and 1
 hour; the fifth failure marks the message ``dead``.
 
+  pending   waiting for its next attempt
+  sent      delivered; the text is gone, the key stays
+  dead      failed five times; nobody retries it
+
 The idempotency key is unique — one reply per run — so a run replayed after a
 crash that answers again writes nothing, and the conversation hears once.
 Delivery is at-least-once: a send that reached the channel just before the
 process died is sent again, because the row was not yet marked ``sent``.
+
+``Outbox`` is the port the application talks to (``application.delivery`` is
+its only caller); ``PostgresOutbox`` is its one implementation today.
 """
 
 from datetime import datetime, timedelta
+from typing import Any, Protocol
 
 import attrs
 import databases
@@ -38,9 +46,6 @@ _BACKOFF = (
 # any channel send can take, so a message being sent is never claimed twice.
 _HOLD = timedelta(seconds=60)
 
-# SQLModel exposes the SQLAlchemy Table at runtime; mypy needs the hint.
-_TABLE: sa.Table = models.OutboundMessageRecord.__table__  # type: ignore[attr-defined]
-
 
 def retry_delay(*, attempts: int) -> timedelta | None:
     """
@@ -66,12 +71,64 @@ class OutboundMessage:
     attempts: int
 
 
+class Outbox(Protocol):
+    """
+    Replies awaiting delivery. Every method may raise on a store outage.
+    """
+
+    async def enqueue(
+        self, *, key: str, origin: entities.Origin, text: str, vote: bool
+    ) -> OutboundMessage | None:
+        """
+        Record a reply and return it, or return None when ``key`` already has
+        one — sent or not. The returned message is hidden from ``claim_due``
+        for a moment: the caller makes the first attempt itself.
+        """
+        ...
+
+    async def claim_due(self, *, now: datetime) -> list[OutboundMessage]:
+        """
+        Return the pending replies whose next attempt time has passed, oldest
+        first, hiding each from the next claim while it is being sent — so
+        two claimers can never send the same reply.
+        """
+        ...
+
+    async def mark_sent(self, message_id: int) -> None:
+        """
+        Record a delivered reply. Its text is dropped; only the key stays, as
+        the guard against answering the same run twice.
+        """
+        ...
+
+    async def record_failure(
+        self, message_id: int, *, error: str, retry_in: timedelta | None
+    ) -> None:
+        """
+        Count one failed delivery: the reply is due again after ``retry_in``,
+        or dead when it is None. ``error`` is a short label, never a message
+        that could carry conversation content.
+        """
+        ...
+
+    async def purge(self, *, cutoff: datetime) -> int:
+        """
+        Remove the delivered and dead replies recorded before ``cutoff`` and
+        return how many were removed. Pending replies are never purged.
+        """
+        ...
+
+
+# SQLModel exposes the SQLAlchemy Table at runtime; mypy needs the hint.
+_TABLE: sa.Table = models.OutboundMessageRecord.__table__  # type: ignore[attr-defined]
+
+
 @attrs.frozen
 class PostgresOutbox:
     """
-    Replies awaiting delivery, over Postgres. ``enqueue`` is an atomic
-    insert-if-absent on the idempotency key; ``claim_due`` hides what it
-    returns for ``_HOLD``, so a slow send is never picked up a second time.
+    ``Outbox`` over Postgres. ``enqueue`` is one insert-if-absent on the
+    unique key, and ``claim_due`` one UPDATE that pushes each claimed row's
+    next attempt out by ``_HOLD`` — the claim is its own lock.
     """
 
     database: databases.Database
@@ -79,10 +136,6 @@ class PostgresOutbox:
     async def enqueue(
         self, *, key: str, origin: entities.Origin, text: str, vote: bool
     ) -> OutboundMessage | None:
-        """
-        Record a reply and return it — held for the caller's own immediate
-        attempt — or return None when the key already has one.
-        """
         row = await self.database.fetch_one(
             pg.insert(_TABLE)
             .values(
@@ -92,7 +145,7 @@ class PostgresOutbox:
                 vote=vote,
                 status=PENDING,
                 attempts=0,
-                next_attempt_at=sa.func.now() + _HOLD,
+                next_attempt_at=sa.func.now() + _interval(_HOLD),
                 last_error="",
                 created_at=sa.func.now(),
             )
@@ -102,10 +155,6 @@ class PostgresOutbox:
         return _from_row(row) if row is not None else None
 
     async def claim_due(self, *, now: datetime) -> list[OutboundMessage]:
-        """
-        Return the pending replies whose next attempt time has passed, oldest
-        first, hiding each from the next claim while it is being sent.
-        """
         rows = await self.database.fetch_all(
             sa.update(_TABLE)
             .where(sa.and_(_TABLE.c.status == PENDING, _TABLE.c.next_attempt_at <= now))
@@ -115,10 +164,6 @@ class PostgresOutbox:
         return sorted((_from_row(row) for row in rows), key=lambda message: message.id)
 
     async def mark_sent(self, message_id: int) -> None:
-        """
-        Record a delivered reply. Its text is blanked — only the key stays,
-        as the guard against answering the same run twice.
-        """
         await self.database.execute(
             sa.update(_TABLE)
             .where(_TABLE.c.id == message_id)
@@ -128,24 +173,16 @@ class PostgresOutbox:
     async def record_failure(
         self, message_id: int, *, error: str, retry_in: timedelta | None
     ) -> None:
-        """
-        Count one failed delivery: retry after ``retry_in``, or mark the
-        reply dead when it is None.
-        """
         values: dict[str, object] = {"attempts": _TABLE.c.attempts + 1, "last_error": error}
         if retry_in is None:
             values["status"] = DEAD
         else:
-            values["next_attempt_at"] = sa.func.now() + retry_in
+            values["next_attempt_at"] = sa.func.now() + _interval(retry_in)
         await self.database.execute(
             sa.update(_TABLE).where(_TABLE.c.id == message_id).values(**values)
         )
 
     async def purge(self, *, cutoff: datetime) -> int:
-        """
-        Remove the delivered and dead replies recorded before ``cutoff`` and
-        return how many were removed.
-        """
         rows = await self.database.fetch_all(
             sa.delete(_TABLE)
             .where(sa.and_(_TABLE.c.status != PENDING, _TABLE.c.created_at < cutoff))
@@ -154,7 +191,15 @@ class PostgresOutbox:
         return len(rows)
 
 
-def _from_row(row: databases.interfaces.Record) -> OutboundMessage:
+def _interval(delta: timedelta) -> sa.ColumnElement[timedelta]:
+    """
+    Return ``delta`` as an explicitly typed SQL interval, so Postgres never
+    has to guess what an untyped parameter next to ``now()`` is.
+    """
+    return sa.cast(delta, sa.Interval)
+
+
+def _from_row(row: Any) -> OutboundMessage:
     return OutboundMessage(
         id=row["id"],
         key=row["idempotency_key"],

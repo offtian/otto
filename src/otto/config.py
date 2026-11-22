@@ -79,13 +79,13 @@ class Configuration(pydantic.BaseModel):
     approvals: pydantic.SkipValidation[support_approvals.ApprovalStore] = None  # type: ignore[assignment]
     # Durable inbox for inbound requests; None = no database, so nothing
     # survives a restart to replay and redeliveries dedup in-process only.
-    inbox: pydantic.SkipValidation[support_inbox.PostgresInbox | None] = None
+    inbox: pydantic.SkipValidation[support_inbox.Inbox | None] = None
     # Durable outbox for replies; None = no database, so a reply is sent
     # once, inline, and a channel failure surfaces to the caller.
-    outbox: pydantic.SkipValidation[support_outbox.PostgresOutbox | None] = None
+    outbox: pydantic.SkipValidation[support_outbox.Outbox | None] = None
     # Follow-ups agents schedule for themselves; None = no database, and
     # the scheduling tools say so instead of failing.
-    follow_ups: pydantic.SkipValidation[support_followups.PostgresFollowUpStore | None] = None
+    follow_ups: pydantic.SkipValidation[support_followups.FollowUpStore | None] = None
     model: pydantic.SkipValidation[model_interface.Model] = None  # type: ignore[assignment]
     # MCP mounts are optional: None = capability runs on its local stub
     # tool, so the full loop works in dev with zero external dependencies.

@@ -84,7 +84,7 @@ class SupportContext:
     # The conversation itself and the follow-up store, for the tools that
     # schedule a later wake-up on it; None = follow-ups unavailable here.
     origin: entities.Origin | None = None
-    follow_ups: followups.PostgresFollowUpStore | None = None
+    follow_ups: followups.FollowUpStore | None = None
 
 
 @agents.function_tool

@@ -101,7 +101,7 @@ async def send(*, origin: entities.Origin, text: str, vote: bool = False) -> Non
                 await cfg.jira.post_comment(issue_key=issue_key, text=text)
 
 
-async def _attempt(message: outbox.OutboundMessage, *, store: outbox.PostgresOutbox) -> None:
+async def _attempt(message: outbox.OutboundMessage, *, store: outbox.Outbox) -> None:
     """
     Try one delivery of a recorded reply and record how it went. Never
     raises on a failed send — the outbox owns the retry.
