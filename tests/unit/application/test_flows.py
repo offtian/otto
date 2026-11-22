@@ -1,10 +1,12 @@
 import types
+from datetime import UTC, datetime
 from unittest import mock
 
 import agents
 
 from otto import config
 from otto.application import flows, graph
+from otto.domain.support import memory as support_memory
 from otto.vendors import llm
 
 
@@ -19,16 +21,16 @@ class FakeIntentClassifier:
 
 
 class FakeMemoryStore:
-    def __init__(self, passages=(), error=None):
-        self.passages = list(passages)
+    def __init__(self, memories=(), error=None):
+        self.memories = list(memories)
         self.error = error
         self.queries: list[str] = []
 
-    async def search(self, *, query: str) -> list[str]:
+    async def search(self, *, query: str, limit: int) -> list[support_memory.Memory]:
         self.queries.append(query)
         if self.error is not None:
             raise self.error
-        return list(self.passages)
+        return self.memories[:limit]
 
 
 def _wire(monkeypatch, *, intent_classifier=None, access_agent=None, memory=None):
@@ -173,12 +175,17 @@ class TestSupportGraph:
 
 
 class TestRetrievalGate:
-    PAST_CASE = "Symptom: VPN drops on hotel wifi. Fix: switch the client to TCP mode."
+    PAST_CASE = support_memory.Memory(
+        id=7,
+        note="Symptom: VPN drops on hotel wifi. Fix: switch the client to TCP mode.",
+        times_seen=3,
+        last_seen=datetime(2026, 11, 20, tzinfo=UTC),
+    )
 
     async def test_an_open_gate_recalls_past_cases_into_the_agents_input(self, monkeypatch):
         # Given a reading that says memory would help, and a memory holding
         # a similar past case
-        memory = FakeMemoryStore(passages=[self.PAST_CASE])
+        memory = FakeMemoryStore(memories=[self.PAST_CASE])
         _cfg, run_spy = _wire(
             monkeypatch,
             intent_classifier=FakeIntentClassifier(
@@ -191,16 +198,18 @@ class TestRetrievalGate:
         await flows.SUPPORT.run(_state())
 
         # Then memory was searched with the reading's keywords, and the agent
-        # reads the request followed by the past case, marked as unverified
+        # reads the request followed by the past case — with how often and how
+        # recently it held — marked as unverified
         agent_input = run_spy.await_args.args[1]
         assert memory.queries == ["vpn hotel wifi"]
         assert agent_input.startswith("the input")
-        assert self.PAST_CASE in agent_input
+        assert "Past case (seen 3 times, last on 2026-11-20):" in agent_input
+        assert self.PAST_CASE.note in agent_input
         assert "may not apply" in agent_input
 
     async def test_a_closed_gate_leaves_memory_alone(self, monkeypatch):
         # Given a reading that says memory would not help
-        memory = FakeMemoryStore(passages=[self.PAST_CASE])
+        memory = FakeMemoryStore(memories=[self.PAST_CASE])
         _cfg, run_spy = _wire(
             monkeypatch,
             intent_classifier=FakeIntentClassifier(llm.IntentReading(intent=llm.INTENT_ACCESS)),
@@ -220,7 +229,7 @@ class TestRetrievalGate:
         _cfg, run_spy = _wire(
             monkeypatch,
             intent_classifier=FakeIntentClassifier(llm.IntentReading(recall="vpn hotel wifi")),
-            memory=FakeMemoryStore(error=RuntimeError("graph store down")),
+            memory=FakeMemoryStore(error=RuntimeError("database down")),
         )
 
         # When the request runs through the support graph

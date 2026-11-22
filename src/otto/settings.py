@@ -111,17 +111,15 @@ class Settings(BaseSettings):
     sailpoint_mcp_url: str = ""
     sailpoint_mcp_token: str = ""
 
-    # Long-term memory (Cognee, embedded): resolved conversations ingest on
-    # resolution signals and agents search them via the search_memory tool.
-    # Off by default — cognify runs LLM calls through the same gateway as
-    # the agents (llm_*); embeddings need their own OpenAI-compatible
-    # endpoint. Storage backends are Cognee's own env vars (local files by
-    # default; Postgres/pgvector in prod).
+    # Long-term memory: on a confirmed resolution the conversation is
+    # distilled into a de-identified case note (one model call on llm_model),
+    # kept in this database and found again by keyword — no embeddings, and
+    # no model call to search. Off by default: it stores what it learns, so
+    # turning it on is a decision. Needs DATABASE_URL.
     memory_enabled: bool = False
-    memory_embedding_endpoint: str = ""
-    memory_embedding_model: str = ""
-    memory_embedding_dimensions: int = 0
-    memory_dataset: str = "support_resolutions"
+    # A note that no resolved case has matched for this many days is
+    # forgotten by the maintenance sweep.
+    memory_retention_days: int = 365
 
     # The catalog: a YAML file of two flat lists — the specialists the
     # general agent may consult and the repositories it may propose changes

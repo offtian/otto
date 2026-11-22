@@ -1,12 +1,13 @@
 import json
 import pathlib
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import agents
 from agents import tool_context
 
 from otto.domain.support import agent as support_agent
 from otto.domain.support import entities, followups
+from otto.domain.support import memory as support_memory
 
 
 class FakeTicketBackend:
@@ -27,19 +28,19 @@ class FakeTicketBackend:
 
 
 class FakeMemoryStore:
-    def __init__(self, passages=None, error=None):
-        self.passages = passages or []
+    def __init__(self, memories=None, error=None):
+        self.memories = memories or []
         self.error = error
         self.queries = []
 
-    async def ingest(self, *, text):
-        raise AssertionError("the search tool must never ingest")
+    async def remember(self, *, note):
+        raise AssertionError("the search tool must never write to memory")
 
-    async def search(self, *, query):
+    async def search(self, *, query, limit):
         self.queries.append(query)
         if self.error is not None:
             raise self.error
-        return list(self.passages)
+        return self.memories[:limit]
 
 
 class FakeFollowUpStore:
@@ -151,17 +152,34 @@ class TestEscalateToHuman:
 
 
 class TestSearchMemory:
-    async def test_returns_the_stored_passages_best_first(self, tmp_path):
+    async def test_returns_past_cases_best_first_with_how_often_each_held(self, tmp_path):
         # Given a memory store holding two relevant past cases
-        memory = FakeMemoryStore(passages=["Fixed by bumping the base image.", "VPN case."])
+        memory = FakeMemoryStore(
+            memories=[
+                support_memory.Memory(
+                    id=1,
+                    note="Fixed by bumping the base image.",
+                    times_seen=2,
+                    last_seen=datetime(2026, 11, 20, tzinfo=UTC),
+                ),
+                support_memory.Memory(
+                    id=2,
+                    note="VPN case.",
+                    times_seen=1,
+                    last_seen=datetime(2026, 10, 1, tzinfo=UTC),
+                ),
+            ]
+        )
 
         # When the memory tool is invoked
         answer = await support_agent.search_memory.on_invoke_tool(
             _context(tmp_path, memory=memory), json.dumps({"query": "template build fails"})
         )
 
-        # Then the passages come back joined, and the store saw the query
-        assert "bumping the base image" in answer
+        # Then both cases come back in the store's order, each headed by its
+        # history, and the store saw the query
+        assert answer.index("bumping the base image") < answer.index("VPN case.")
+        assert "Past case (seen 2 times, last on 2026-11-20):" in answer
         assert memory.queries == ["template build fails"]
 
     async def test_says_so_when_no_memory_is_configured(self, tmp_path):
@@ -176,7 +194,7 @@ class TestSearchMemory:
 
     async def test_fails_soft_when_the_store_errors(self, tmp_path):
         # Given a memory store that raises on search
-        memory = FakeMemoryStore(error=RuntimeError("graph store down"))
+        memory = FakeMemoryStore(error=RuntimeError("database down"))
 
         # When the memory tool is invoked
         answer = await support_agent.search_memory.on_invoke_tool(
