@@ -85,6 +85,9 @@ router → dispatch.accept → dispatch.handle_safely → flows.SUPPORT → deli
   request id for an answer or its apology; `approval:<id>`, `pending:<id>` and
   `expired:<id>` for approval outcomes. Courtesy notes (`delivery.send`) and
   approval cards are the only exceptions.
+- **A reply is Markdown.** Agents write Markdown and `delivery.send` renders
+  it for the channel (`utils/markup`), escaping it for Slack. What Otto posts
+  itself through `cfg.slack` — cards, notes under them — is already mrkdwn.
 - **A request can arrive later.** A due follow-up and a pull request event
   (`POST /github/webhook`) are turned into a `SupportRequest` on the original
   conversation and enter through `dispatch.accept` like any other — on behalf

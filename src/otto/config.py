@@ -83,6 +83,10 @@ class Configuration(pydantic.BaseModel):
     # Durable inbox for inbound requests; None = no database, so nothing
     # survives a restart to replay and redeliveries dedup in-process only.
     inbox: pydantic.SkipValidation[support_inbox.Inbox | None] = None
+    # Whether a reply is rendered from Markdown into its channel's own
+    # markup on the way out. The dev chat turns this off: it displays
+    # Markdown as it is.
+    channel_markup: bool = True
     # Durable outbox for replies; None = no database, so a reply is sent
     # once, inline, and a channel failure surfaces to the caller.
     outbox: pydantic.SkipValidation[support_outbox.Outbox | None] = None

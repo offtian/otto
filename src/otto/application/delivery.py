@@ -5,13 +5,16 @@ once, and leaves a failed send to ``retry_due`` — a channel outage delays the
 reply instead of losing it, and a run replayed after a crash cannot answer
 the same conversation twice. Without one (no database) a reply is simply
 sent, exactly as before.
+
+A reply is Markdown — what an agent writes, and what Otto's own notes here
+are — and it is rendered into the channel's own markup as it is sent.
 """
 
 from datetime import datetime
 
 from otto import config
 from otto.domain.support import entities, outbox
-from otto.utils import logs
+from otto.utils import logs, markup
 
 
 async def deliver(*, key: str, origin: entities.Origin, text: str, vote: bool = False) -> None:
@@ -68,7 +71,8 @@ async def retry_due(*, now: datetime) -> None:
 async def send(*, origin: entities.Origin, text: str, vote: bool = False) -> None:
     """
     Send one reply to its channel, once, with no record — the raw channel
-    send. Slack answers may carry a "Did this help?" resolution vote (T2);
+    send. The text is Markdown and is rendered here into the channel's own
+    markup. Slack answers may carry a "Did this help?" resolution vote (T2);
     ticket answers rely on the native status signal (D6), so they post as a
     plain comment.
 
@@ -79,6 +83,8 @@ async def send(*, origin: entities.Origin, text: str, vote: bool = False) -> Non
     :raises Exception: whatever the channel client raises on a failed send.
     """
     cfg = config.get_config()
+    if cfg.channel_markup:
+        text = _for_channel(origin, text)
     match origin:
         case entities.SlackThread(channel_id=channel_id, thread_ts=thread_ts):
             if vote:
@@ -99,6 +105,14 @@ async def send(*, origin: entities.Origin, text: str, vote: bool = False) -> Non
                 logs.log_event("ticket_reply_skipped", params={"issue_key": issue_key})
             else:
                 await cfg.jira.post_comment(issue_key=issue_key, text=text)
+
+
+def _for_channel(origin: entities.Origin, markdown: str) -> str:
+    match origin:
+        case entities.SlackThread():
+            return markup.slack_mrkdwn(markdown)
+        case entities.TicketRef():
+            return markup.jira_wiki(markdown)
 
 
 async def _attempt(message: outbox.OutboundMessage, *, store: outbox.Outbox) -> None:
