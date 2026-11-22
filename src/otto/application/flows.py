@@ -12,10 +12,15 @@ long-term memory is worth searching for this request, and only then are past
 cases recalled into the agent's input — retrieval on every turn is slower
 and, worse, lets irrelevant memories bias the answer.
 
-State keys the nodes read: ``text`` (the raw request, for the classifier),
-``input`` (the rebuilt conversation input, plus any recalled past cases),
-``ctx`` (the ``SupportContext``), and optionally ``resume`` (a paused run's
-serialized state plus the human decision).
+The general agent is also told which runbooks the request looks to be about,
+matched by keyword against what each is called, so it can open the right one
+without listing them first.
+
+State keys the nodes read: ``text`` (the raw request, for the classifier and
+the runbook match), ``input`` (the rebuilt conversation input, plus any
+recalled past cases and runbook hint), ``ctx`` (the ``SupportContext``), and
+optionally ``resume`` (a paused run's serialized state plus the human
+decision).
 """
 
 import dataclasses
@@ -26,6 +31,7 @@ from otto import config
 from otto.application import graph
 from otto.domain.support import agent as support_agent
 from otto.domain.support import memory as support_memory
+from otto.domain.support import runbooks as support_runbooks
 from otto.utils import logs
 from otto.vendors import llm
 
@@ -105,7 +111,36 @@ async def _access(state: graph.State) -> graph.NodeResult:
 
 
 async def _general(state: graph.State) -> graph.NodeResult:
+    _hint_runbooks(state)
     return await _run_agent(config.get_config().agent, state)
+
+
+def _hint_runbooks(state: graph.State) -> None:
+    """
+    Name the runbooks this request looks to be about in the agent's input,
+    so it can open one without listing them first. Only the general agent
+    has the runbook tools, so only its node hints. No match, a resumed run,
+    or a runbook that cannot be read all leave the input untouched — a hint
+    is an assist, and the agent can still list the runbooks itself.
+    """
+    if "resume" in state or not isinstance(state.get("input"), str):
+        return
+    try:
+        # The directory the agent's own runbook tools read, so every name
+        # hinted is one read_runbook can open.
+        names = support_runbooks.match(text=state["text"], runbooks_dir=state["ctx"].runbooks_dir)
+    except (OSError, ValueError) as exc:
+        logs.log_exception(exc, params={"job": "runbook_hint"})
+        return
+    if not names:
+        return
+    state["input"] = (
+        f"{state['input']}\n\n"
+        f"Runbooks whose names match this request: {', '.join(names)}. It is a "
+        "keyword match and may not fit — if one does, open it with read_runbook."
+    )
+    # The count only: which runbook matched derives from the request (NFR2).
+    logs.log_event("runbooks_hinted", params={"runbooks": len(names)})
 
 
 async def _run_agent(

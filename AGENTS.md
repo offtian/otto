@@ -108,6 +108,10 @@ router → dispatch.accept → dispatch.handle_safely → flows.SUPPORT → deli
 - **A specialist or a repository** is an entry in `otto.yaml` (two flat lists),
   mounted on the general agent by `catalog.mount`. No new agent, no routing,
   no orchestration code.
+- **A runbook** is a Markdown file in `runbooks/`. Its file name and the
+  topic before the dash in its first heading are what a request is matched
+  against (`domain/support/runbooks`) to hint the agent, so call it what a
+  requester would.
 - **A new write** is a function tool with `needs_approval=True`. An MCP tool is
   gated unless `policy.UNGATED_TOOLS` clears it with a sign-off reference.
 - **A repository change** goes through `domain/support/changes`: exact-match

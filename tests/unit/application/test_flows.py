@@ -1,3 +1,4 @@
+import pathlib
 import types
 from datetime import UTC, datetime
 from unittest import mock
@@ -50,8 +51,13 @@ def _wire(monkeypatch, *, intent_classifier=None, access_agent=None, memory=None
     return cfg, run_spy
 
 
-def _state() -> graph.State:
-    return {"text": "I need snowflake access", "input": "the input", "ctx": mock.sentinel.ctx}
+def _state(
+    *, text: str = "I need snowflake access", runbooks_dir: pathlib.Path | None = None
+) -> graph.State:
+    # The context carries the runbook directory the agent's tools read; one
+    # that does not exist means no runbook is ever hinted.
+    ctx = types.SimpleNamespace(runbooks_dir=runbooks_dir or pathlib.Path("no-runbooks-here"))
+    return {"text": text, "input": "the input", "ctx": ctx}
 
 
 class TestSupportGraph:
@@ -172,6 +178,62 @@ class TestSupportGraph:
         # Then the interruption was rejected, never approved
         run_state.reject.assert_called_once_with(interruption)
         run_state.approve.assert_not_called()
+
+
+class TestRunbookHints:
+    @staticmethod
+    def _runbooks(directory: pathlib.Path) -> pathlib.Path:
+        (directory / "vpn.md").write_text(
+            "# VPN — connect or fix a broken connection\n", encoding="utf-8"
+        )
+        return directory
+
+    async def test_a_request_about_a_runbook_names_it_in_the_agents_input(
+        self, monkeypatch, tmp_path
+    ):
+        # Given a runbook directory holding a VPN runbook
+        _cfg, run_spy = _wire(monkeypatch)
+        state = _state(text="My VPN keeps dropping", runbooks_dir=self._runbooks(tmp_path))
+
+        # When a request about the VPN runs through the support graph
+        await flows.SUPPORT.run(state)
+
+        # Then the general agent reads the request followed by the runbook's
+        # name, offered as a keyword match it may open
+        agent_input = run_spy.await_args.args[1]
+        assert agent_input.startswith("the input")
+        assert "match this request: vpn." in agent_input
+        assert "read_runbook" in agent_input
+
+    async def test_a_request_about_no_runbook_is_left_as_it_was(self, monkeypatch, tmp_path):
+        # Given a runbook directory holding a VPN runbook
+        _cfg, run_spy = _wire(monkeypatch)
+        state = _state(
+            text="Where is the holiday calendar?", runbooks_dir=self._runbooks(tmp_path)
+        )
+
+        # When a request about something else runs through the support graph
+        await flows.SUPPORT.run(state)
+
+        # Then the agent's input is untouched
+        assert run_spy.await_args.args[1] == "the input"
+
+    async def test_the_access_agent_is_never_hinted(self, monkeypatch, tmp_path):
+        # Given an access-routed request that happens to mention the VPN
+        _cfg, run_spy = _wire(
+            monkeypatch,
+            intent_classifier=FakeIntentClassifier(llm.IntentReading(intent=llm.INTENT_ACCESS)),
+            access_agent=mock.sentinel.access_agent,
+        )
+        state = _state(text="I need VPN access", runbooks_dir=self._runbooks(tmp_path))
+
+        # When it runs through the support graph
+        await flows.SUPPORT.run(state)
+
+        # Then the access agent — which has no runbook tools — reads the
+        # request alone
+        assert run_spy.await_args.args[0] is mock.sentinel.access_agent
+        assert run_spy.await_args.args[1] == "the input"
 
 
 class TestRetrievalGate:
