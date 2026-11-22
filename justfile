@@ -132,6 +132,16 @@ otto-off:
 otto-on:
     docker compose exec -T postgres psql -U postgres -d otto -c "INSERT INTO runtime_flags (name, value) VALUES ('otto_enabled', 'true') ON CONFLICT (name) DO UPDATE SET value = 'true'"
 
+# Every case note in long-term memory, most recently confirmed first, with
+# how many resolved cases have matched it.
+# Read what Otto remembers
+memory:
+    docker compose exec -T postgres psql -U postgres -d otto -c "SELECT id, times_seen AS seen, last_seen::date AS last, note FROM memory_notes ORDER BY last_seen DESC"
+
+# Delete one case note by its id (see `just memory`), and print what went
+memory-forget ID:
+    docker compose exec -T postgres psql -U postgres -d otto -c "DELETE FROM memory_notes WHERE id = {{ ID }} RETURNING id, note"
+
 # Requests still in flight, replies not yet delivered (or given up on),
 # scheduled follow-ups, and approvals awaiting a decision — ids, states and
 # times only, never conversation text.
