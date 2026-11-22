@@ -101,6 +101,37 @@ class InboundRequestRecord(SQLModel, table=True):
     )
 
 
+class OutboundMessageRecord(SQLModel, table=True):
+    """
+    One reply Otto owes a conversation — the outbox. A reply is recorded
+    before it is sent, so a channel outage delays it instead of losing it:
+    undelivered rows are retried with backoff and marked ``dead`` after the
+    fifth failure. ``idempotency_key`` is unique (one reply per run), so a run
+    that is replayed after a crash and answers again writes nothing.
+    """
+
+    __tablename__ = "outbox"
+
+    id: int | None = Field(default=None, primary_key=True)
+    idempotency_key: str = Field(unique=True)
+    origin: str = Field(sa_column=Column(Text, nullable=False))  # serialized Origin (json)
+    # Conversation content (PII): blanked the moment the reply is delivered;
+    # a dead reply keeps it until the retention sweep purges the row.
+    body: str = Field(sa_column=Column(Text, nullable=False))
+    # Whether the reply carries the "Did this help?" vote where the channel
+    # supports one (Slack answers).
+    vote: bool = False
+    status: str = Field(default="pending", index=True)  # pending | sent | dead
+    attempts: int = 0
+    next_attempt_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    # The failure's exception class only — never its message (NFR2).
+    last_error: str = ""
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(tz=UTC),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
 class RuntimeFlagRecord(SQLModel, table=True):
     """
     One runtime-tunable flag (C1): today only ``otto_enabled`` — the kill

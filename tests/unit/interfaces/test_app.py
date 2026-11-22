@@ -9,7 +9,7 @@ from fastapi import testclient
 from slack_sdk.signature import SignatureVerifier
 
 from otto import config
-from otto.application import dispatch, killswitch, support
+from otto.application import delivery, dispatch, killswitch, support
 from otto.domain.identity import users
 from otto.domain.support import approvals, entities
 from otto.interfaces import app as otto_app
@@ -655,6 +655,24 @@ class TestStartupRecovery:
 
         # Then the request is handled after all
         handler.assert_awaited_once_with(request=self.IN_FLIGHT)
+
+
+class TestAlwaysOnTick:
+    @pytest.mark.parametrize("otto_enabled", [True, False])
+    async def test_retries_undelivered_replies_only_while_otto_is_enabled(
+        self, monkeypatch, otto_enabled
+    ):
+        # Given a retry spy and a kill switch in the given position
+        retry = mock.AsyncMock()
+        monkeypatch.setattr(delivery, "retry_due", retry)
+        kill_switch = mock.AsyncMock()
+        kill_switch.enabled.return_value = otto_enabled
+
+        # When the always-on tick runs
+        await otto_app._always_on_tick(kill_switch)
+
+        # Then queued replies go out only if Otto may speak
+        assert retry.await_count == int(otto_enabled)
 
 
 class TestHealthz:
