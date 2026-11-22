@@ -116,21 +116,28 @@ INTENTS = (
 class IntentReading:
     """
     One classified inbound request: the intent label (None = unclassified —
-    callers fall back to the general flow) and the service/tool names the
-    request mentions, the key owning-team resolution routes on. The services
-    are derived from untrusted message text: never log them (NFR2).
+    callers fall back to the general flow), the service/tool names the
+    request mentions (the key owning-team resolution routes on), and the
+    retrieval gate's verdict — ``recall`` holds the keywords to search
+    long-term memory with when a past case would help, and is empty when the
+    gate is closed. Services and recall keywords are derived from untrusted
+    message text: never log them (NFR2).
     """
 
     intent: str | None = None
     services: tuple[str, ...] = ()
+    recall: str = ""
 
 
 @attrs.frozen
 class LLMIntentClassifier:
     """
-    Routes each inbound request to a support flow with one zero-shot JSON
-    completion. Fail-open like the team classifier: any error or
-    off-taxonomy reply yields an empty reading, never a blocked request.
+    Reads each inbound request with one zero-shot JSON completion: which
+    flow it belongs to, and — the retrieval gate — whether long-term memory
+    is worth searching for it. One call answers both, so the gate costs no
+    extra round-trip. Fail-open like the team classifier: any error or
+    off-taxonomy reply yields an empty reading, never a blocked request (and
+    a closed gate — the agent can still search memory itself).
     """
 
     client: openai.AsyncOpenAI
@@ -145,7 +152,11 @@ class LLMIntentClassifier:
             f"intent: exactly one of {', '.join(INTENTS)}.\n"
             "services: the product/tool/system names the request mentions "
             '(e.g. ["coder", "jenkins"]), lowercase, [] if none.\n'
-            'Reply with JSON only: {"intent": "...", "services": [...]}\n\n'
+            "recall: a few search keywords for our memory of previously resolved "
+            "cases, if knowing how a similar issue was fixed before would help "
+            'answer this; "" for access requests, greetings, and anything '
+            "self-contained.\n"
+            'Reply with JSON only: {"intent": "...", "services": [...], "recall": "..."}\n\n'
             f"Request:\n{text}"
         )
         try:
@@ -162,6 +173,7 @@ class LLMIntentClassifier:
             return IntentReading()
         intent = data.get("intent")
         services = data.get("services")
+        recall = data.get("recall")
         return IntentReading(
             intent=intent if intent in INTENTS else None,
             services=(
@@ -169,6 +181,7 @@ class LLMIntentClassifier:
                 if isinstance(services, list)
                 else ()
             ),
+            recall=recall.strip() if isinstance(recall, str) else "",
         )
 
 

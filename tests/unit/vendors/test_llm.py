@@ -73,6 +73,30 @@ class TestLLMIntentClassifier:
             intent="troubleshooting", services=("coder", "jenkins")
         )
 
+    async def test_reads_the_retrieval_gates_keywords(self):
+        # Given a model reply that says past cases would help, with keywords
+        classifier = _intent_classifier(
+            reply='{"intent": "troubleshooting", "services": [], "recall": " vpn hotel wifi "}'
+        )
+
+        # When a request is classified
+        reading = await classifier.classify(text="My VPN keeps dropping at the hotel")
+
+        # Then the reading carries the trimmed keywords — the gate is open
+        assert reading.recall == "vpn hotel wifi"
+
+    async def test_keeps_the_gate_closed_when_the_reply_is_not_keywords(self):
+        # Given a model reply whose recall field is not a string
+        classifier = _intent_classifier(
+            reply='{"intent": "how_to", "services": [], "recall": true}'
+        )
+
+        # When a request is classified
+        reading = await classifier.classify(text="How do I reset my password?")
+
+        # Then the gate stays closed rather than searching for nonsense
+        assert reading.recall == ""
+
     async def test_reads_the_json_out_of_model_chatter(self):
         # Given a local thinking model that decorates its answer with fences
         classifier = _intent_classifier(
