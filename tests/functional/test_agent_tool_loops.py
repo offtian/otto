@@ -10,6 +10,7 @@ prompt tweak that changes wording must not fail CI, only a broken loop should.
 
 import json
 import pathlib
+import types
 
 import agents
 from agents.items import ModelResponse
@@ -21,6 +22,8 @@ from openai.types.responses import (
     ResponseOutputText,
 )
 
+from otto import config
+from otto.application import flows, graph
 from otto.domain.support import agent as support_agent
 
 
@@ -54,6 +57,7 @@ class ScriptedModel(Model):
     def __init__(self, turns):
         self.turns = list(turns)
         self.inputs = []
+        self.tool_choices = []
 
     async def get_response(
         self,
@@ -70,6 +74,7 @@ class ScriptedModel(Model):
         prompt=None,
     ):
         self.inputs.append(input)
+        self.tool_choices.append(model_settings.tool_choice)
         return ModelResponse(output=self.turns.pop(0), usage=Usage(), response_id=None)
 
     def stream_response(self, *args, **kwargs):
@@ -174,3 +179,42 @@ class TestAgentToolLoops:
         assert len(model.inputs) == 1
         assert not result.interruptions
         assert backend.escalations == []
+
+
+class TestTurnLimit:
+    FINAL_ANSWER = "I checked the runbooks but ran out of steps before finding a fix."
+
+    async def test_a_run_out_of_turns_answers_from_what_it_gathered(self, monkeypatch):
+        # Given a model that calls a tool on every one of its ten turns, and
+        # answers only when it is given its last, tools-off call
+        model = ScriptedModel(
+            [*([[_tool_call("list_runbooks", {})]] * 10), [_text(self.FINAL_ANSWER)]]
+        )
+        agent = support_agent.build_agent(model=model)
+        monkeypatch.setattr(
+            config,
+            "get_config",
+            lambda: types.SimpleNamespace(
+                agent=agent, access_agent=None, intent_classifier=None, memory=None
+            ),
+        )
+        state: graph.State = {
+            "text": "my VPN is broken",
+            "input": "my VPN is broken",
+            "ctx": support_agent.SupportContext(
+                requester_id="U_TEST",
+                origin_ref="https://slack.com/archives/C/p10",
+                runbooks_dir=pathlib.Path("runbooks"),
+                ticket_backend=RecordingBackend(),
+            ),
+        }
+
+        # When the request runs through the support graph
+        outcome = await flows.SUPPORT.run(state)
+
+        # Then the run finishes with that answer instead of raising, the last
+        # call could not use a tool, and it still saw what the tools returned
+        assert isinstance(outcome, graph.Done)
+        assert str(outcome.output.final_output) == self.FINAL_ANSWER
+        assert model.tool_choices[-1] == "none"
+        assert "vpn" in _fed_back(model)
