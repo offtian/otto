@@ -151,6 +151,24 @@ class FakeRepoHost:
         return PULL_REQUEST_URL
 
 
+class FakeReviewer:
+    """
+    Stand-in for the independent reviewer: answers with a fixed opinion (or
+    fails) and records what it was shown.
+    """
+
+    def __init__(self, review=None, error=None):
+        self.review_to_give = review
+        self.error = error
+        self.seen = []
+
+    async def review(self, *, profile, title, summary, files):
+        self.seen.append((profile.name, title, [file.after for file in files]))
+        if self.error is not None:
+            raise self.error
+        return self.review_to_give
+
+
 @pytest.fixture
 def wire(monkeypatch):
     """
@@ -158,7 +176,7 @@ def wire(monkeypatch):
     repository, and a fake repository host; return (gateway, host).
     """
 
-    def _wire(model):
+    def _wire(model, reviewer=None):
         gateway = FakeSlackGateway()
         host = FakeRepoHost()
         cfg = config.Configuration(
@@ -182,6 +200,7 @@ def wire(monkeypatch):
             ),
             catalog=CATALOG,
             repo_host=host,
+            change_reviewer=reviewer,
         )
         monkeypatch.setattr(config, "get_config", lambda: cfg)
         return gateway, host
@@ -306,3 +325,63 @@ class TestRepositoryChange:
         # the moment of writing, whatever was approved
         assert host.pull_requests == []
         assert "outside the paths that may be changed" in json.dumps(model.inputs[-1], default=str)
+
+
+def _notes_under_the_card(gateway) -> list[str]:
+    return [
+        text
+        for channel, thread_ts, text in gateway.messages
+        if (channel, thread_ts) == ("C_TRIAGE", "200.1")
+    ]
+
+
+class TestSecondOpinion:
+    CONCERN = "Doubles the quota; the README asks for the team lead to be named."
+
+    async def test_the_approver_reads_an_independent_review_under_the_card(self, wire):
+        # Given a reviewer with a concern about the proposed change
+        reviewer = FakeReviewer(
+            changes.Review(approves=False, findings=(self.CONCERN,), reviewer="claude-opus-5-5")
+        )
+        gateway, _host = wire(_proposing_model(), reviewer=reviewer)
+
+        # When the request pauses for approval
+        await _ask_for_more_cpu()
+
+        # Then the reviewer was shown the file as the change would leave it,
+        # and its opinion sits in the card's thread for the approver
+        (repo, title, contents) = reviewer.seen[0]
+        (note,) = _notes_under_the_card(gateway)
+        assert (repo, title) == ("acme/infra-live", PROPOSAL["title"])
+        assert "ai            = { cpu = 32," in contents[0]
+        assert "claude-opus-5-5" in note
+        assert self.CONCERN in note
+
+    async def test_a_reviewer_that_fails_never_holds_up_the_approval(self, wire):
+        # Given a reviewer that cannot be reached
+        gateway, _host = wire(
+            _proposing_model(), reviewer=FakeReviewer(error=TimeoutError("reviewer timed out"))
+        )
+
+        # When the request pauses for approval
+        await _ask_for_more_cpu()
+
+        # Then the card is up and waiting, just without a second opinion
+        assert len(gateway.cards) == 1
+        assert _notes_under_the_card(gateway) == []
+
+    async def test_the_approver_is_told_when_a_proposal_cannot_apply(self, wire):
+        # Given a proposal outside the repository's allowed paths, and no
+        # reviewer wired at all
+        off_limits = PROPOSAL | {
+            "edits": [{"path": ".github/workflows/apply.yml", "old": "", "new": "on: push\n"}]
+        }
+        gateway, _host = wire(_proposing_model(proposal=off_limits))
+
+        # When the request pauses for approval
+        await _ask_for_more_cpu()
+
+        # Then the card's thread says approving it opens nothing, and why
+        (note,) = _notes_under_the_card(gateway)
+        assert "will not apply as proposed" in note
+        assert "outside the paths that may be changed" in note
