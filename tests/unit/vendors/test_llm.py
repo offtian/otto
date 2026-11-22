@@ -130,3 +130,25 @@ class TestLLMIntentClassifier:
         # When a request is classified
         # Then it degrades to an empty reading rather than guessing
         assert await classifier.classify(text="I need access") == llm.IntentReading()
+
+
+class TestLLMEmbedder:
+    async def test_returns_one_vector_per_text_in_the_order_asked(self):
+        # Given a gateway that answers the two texts out of order
+        client = mock.AsyncMock()
+        client.embeddings.create.return_value = mock.Mock(
+            data=[
+                mock.Mock(index=1, embedding=[0.0, 1.0]),
+                mock.Mock(index=0, embedding=[1.0, 0.0]),
+            ]
+        )
+        embedder = llm.LLMEmbedder(client=client, model_name="any-embedding-model")
+
+        # When two texts are embedded
+        vectors = await embedder.embed(texts=["first", "second"])
+
+        # Then each text gets its own vector, from the named model
+        assert vectors == [[1.0, 0.0], [0.0, 1.0]]
+        client.embeddings.create.assert_awaited_once_with(
+            model="any-embedding-model", input=["first", "second"]
+        )

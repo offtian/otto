@@ -96,10 +96,12 @@ router → dispatch.accept → dispatch.handle_safely → flows.SUPPORT → deli
 - **Memory holds case notes, never transcripts.** The only way in is
   consolidation on a confirmed resolution: the conversation is distilled into
   a de-identified note, or confirms one memory already holds. Notes are found
-  by keyword (Postgres full-text search, no embeddings) and reach an agent —
-  through the retrieval gate or `search_memory` — framed as untrusted. The one
-  record that names a person is `requester_cases` (requester id, note id,
-  timestamp): off by default, kept `MEMORY_HISTORY_DAYS`, never any text.
+  by keyword (Postgres full-text search) and, when an embedding model is named,
+  also by meaning (pgvector) — an assist to keywords that fails open to them —
+  and reach an agent, through the retrieval gate or `search_memory`, framed as
+  untrusted. The one record that names a person is `requester_cases` (requester
+  id, note id, timestamp): off by default, kept `MEMORY_HISTORY_DAYS`, never
+  any text.
 - **Anything that makes Otto speak on its own** — reply retries, follow-ups,
   startup replay — checks the kill switch first.
 - **Approval-gated tools mount only on top-level agents.** Specialists and the
@@ -122,8 +124,8 @@ router → dispatch.accept → dispatch.handle_safely → flows.SUPPORT → deli
   approval card shows is what gets applied. A pull request is revised only if
   it carries this conversation's signed return address (`find_revisable`) —
   never a branch Otto did not create.
-- **A new model role** (classifier, distiller, reviewer) is a setting naming a
-  model on the same gateway — no vendor-specific SDK.
+- **A new model role** (classifier, distiller, reviewer, embedder) is a setting
+  naming a model on the same gateway — no vendor-specific SDK.
 
 ## Database
 
@@ -134,3 +136,6 @@ router → dispatch.accept → dispatch.handle_safely → flows.SUPPORT → deli
   Untyped, Postgres reads `now() - $1` as timestamp minus timestamp.
 - Integration tests (`RUN_INTEGRATION=1`) need Postgres: `just infra`,
   `just run-db-migrations`, `just test-integration`.
+- The database must offer the `vector` extension from migration 0017 on (the
+  compose image is `pgvector/pgvector`). A vector travels as text and is cast
+  in SQL (`memory._as_vector`): no pgvector package, no driver codec.

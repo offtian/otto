@@ -142,6 +142,12 @@ memory:
 memory-forget ID:
     docker compose exec -T postgres psql -U postgres -d otto -c "DELETE FROM memory_notes WHERE id = {{ ID }} RETURNING id, note"
 
+# The maintenance sweep embeds notes that have no embedding, a batch at a
+# time, so this is what to run after changing MEMORY_EMBEDDING_MODEL.
+# Clear every note's embedding so the sweep makes them again
+memory-reembed:
+    docker compose exec -T postgres psql -U postgres -d otto -c "UPDATE memory_notes SET embedding = NULL"
+
 # The notes stay: they say nothing about anyone. Only the record of who had them goes.
 # Delete everything remembered about one requester (their Slack user id)
 memory-forget-requester ID:

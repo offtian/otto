@@ -1,11 +1,13 @@
 """
 Model construction for the OpenAI Agents SDK against an OpenAI-compatible
 gateway (LiteLLM, firm proxy) or api.openai.com directly, plus the zero-shot
-classifiers the routing seams run on.
+classifiers the routing seams run on and the embedder memory searches by
+meaning with.
 """
 
 import json
 import typing
+from collections.abc import Sequence
 
 import agents
 import attrs
@@ -201,5 +203,52 @@ def build_intent_classifier(
     """
     return LLMIntentClassifier(
         client=openai.AsyncOpenAI(base_url=base_url or None, api_key=api_key or "unset"),
+        model_name=model_name,
+    )
+
+
+# An embedding is asked for on the way to an answer: better none than a wait.
+_EMBEDDING_TIMEOUT_SECONDS = 10.0
+
+
+@attrs.frozen
+class LLMEmbedder:
+    """
+    Embeds text with a model on the configured gateway (``/v1/embeddings``).
+    Structurally implements the domain ``Embedder`` port
+    (``domain/support/memory``).
+    """
+
+    client: openai.AsyncOpenAI
+    model_name: str
+
+    async def embed(self, *, texts: Sequence[str]) -> list[list[float]]:
+        """
+        Return one vector per text, in the order given.
+
+        :raises openai.OpenAIError: if the gateway refuses or cannot be
+            reached in time.
+        """
+        response = await self.client.embeddings.create(model=self.model_name, input=list(texts))
+        ordered = sorted(response.data, key=lambda item: item.index)
+        return [list(item.embedding) for item in ordered]
+
+
+def build_embedder(
+    *,
+    base_url: str,
+    api_key: str,
+    model_name: str,
+) -> LLMEmbedder:
+    """
+    Return the embedder for one model against the configured gateway.
+    """
+    return LLMEmbedder(
+        client=openai.AsyncOpenAI(
+            base_url=base_url or None,
+            api_key=api_key or "unset",
+            timeout=_EMBEDDING_TIMEOUT_SECONDS,
+            max_retries=1,
+        ),
         model_name=model_name,
     )

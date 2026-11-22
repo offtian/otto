@@ -871,6 +871,17 @@ class TestRequesterHistoryRetention:
         assert history.purge_cutoffs == [now - timedelta(days=7)]
         assert memory.purge_cutoffs == [now - timedelta(days=365)]
 
+    async def test_the_sweep_lets_memory_catch_its_search_by_meaning_up(self, wire):
+        # Given a wired memory
+        memory = FakeMemoryStore()
+        wire(ScriptedModel([]), memory=memory)
+
+        # When the maintenance sweep runs
+        await support.sweep_approvals(now=datetime(2026, 11, 22, tzinfo=UTC))
+
+        # Then memory is asked to bring one bounded batch of notes into it
+        assert memory.reindex_limits == [20]
+
 
 class TestAssistantMode:
     async def test_greeting_welcomes_and_offers_suggested_prompts(self, wire):
@@ -1133,6 +1144,7 @@ class FakeMemoryStore:
         self.remembered = []
         self.confirmed = []
         self.purge_cutoffs = []
+        self.reindex_limits = []
 
     async def remember(self, *, note):
         self._fail_if_down()
@@ -1151,6 +1163,11 @@ class FakeMemoryStore:
     async def purge(self, *, cutoff):
         self._fail_if_down()
         self.purge_cutoffs.append(cutoff)
+        return 0
+
+    async def reindex(self, *, limit):
+        self._fail_if_down()
+        self.reindex_limits.append(limit)
         return 0
 
     def _fail_if_down(self):

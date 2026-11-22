@@ -19,7 +19,22 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.types import UserDefinedType
 from sqlmodel import Field, SQLModel
+
+
+class Vector(UserDefinedType[str]):
+    """
+    pgvector's ``vector`` type, as far as this schema needs it: a column type
+    for DDL and for casts. A value travels as text (``[0.1,0.2]``) and is
+    cast in SQL, so neither a driver codec nor the pgvector package is
+    involved.
+    """
+
+    cache_ok = True
+
+    def get_col_spec(self, **kw: object) -> str:
+        return "vector"
 
 
 class ApprovalRecord(SQLModel, table=True):
@@ -164,7 +179,8 @@ class MemoryNoteRecord(SQLModel, table=True):
     """
     One thing Otto remembers: a de-identified case note distilled from a
     resolved conversation — what was wrong, why, and what fixed it — found
-    again by keyword through the full-text index. ``times_seen`` and
+    again by keyword through the full-text index and, where an embedding
+    model is configured, by meaning through ``embedding``. ``times_seen`` and
     ``last_seen`` are its episodic side: how many resolved cases have matched
     it, and when the last one did. A note nothing has matched for the
     retention window is deleted by the maintenance sweep.
@@ -184,6 +200,9 @@ class MemoryNoteRecord(SQLModel, table=True):
     times_seen: int = 1
     first_seen: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
     last_seen: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    # What the note means, as the embedding model read it. None until one is
+    # configured, or when it could not be reached — the sweep fills it in.
+    embedding: str | None = Field(default=None, sa_column=Column(Vector(), nullable=True))
 
 
 class RequesterCaseRecord(SQLModel, table=True):

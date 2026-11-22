@@ -24,6 +24,9 @@ from otto.utils import logs
 # How many known notes consolidation is shown, to decide whether a resolved
 # case repeats one of them.
 _KNOWN_NOTES_LIMIT = 3
+# How many notes one sweep brings into memory's search by meaning: one
+# embedding request, small enough to finish between two sweeps.
+_REINDEX_BATCH = 20
 
 # The longest an approval card waits for its second opinion before going up
 # without one.
@@ -410,6 +413,7 @@ async def sweep_approvals(*, now: datetime) -> None:
     # Who had which case is kept for much less time than the case notes.
     if cfg.case_history is not None:
         await cfg.case_history.purge(cutoff=now - timedelta(days=s.memory_history_days))
+    await _reindex_memory(cfg=cfg)
     logs.log_event(
         "approval_sweep",
         params={
@@ -420,6 +424,24 @@ async def sweep_approvals(*, now: datetime) -> None:
             "forgotten_memories": forgotten,
         },
     )
+
+
+async def _reindex_memory(*, cfg: config.Configuration) -> None:
+    """
+    Let memory catch its search by meaning up on a batch of notes that are
+    not in it yet — remembered while the embedding model was unreachable, or
+    before one was configured. An assist to an assist: a failure is logged
+    and the sweep carries on.
+    """
+    if cfg.memory is None:
+        return
+    try:
+        reindexed = await cfg.memory.reindex(limit=_REINDEX_BATCH)
+    except Exception as exc:
+        logs.log_exception(exc, params={"job": "memory_reindex"})
+        return
+    if reindexed:
+        logs.log_event("memory_reindexed", params={"notes": reindexed})
 
 
 async def recover_approvals() -> None:
