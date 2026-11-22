@@ -159,6 +159,20 @@ class GitHubRepoHost:
         )
         response.raise_for_status()
 
+    async def download(self, *, repo: str, ref: str) -> bytes:
+        """
+        Return the whole repository at ``ref`` as a gzipped tar archive, as
+        GitHub packs it: every file under one top-level directory.
+
+        :raises httpx.HTTPStatusError: if GitHub refuses the read.
+        """
+        # GitHub answers with a redirect to where the archive is served.
+        response = await self.client.get(
+            f"/repos/{repo}/tarball/{urllib.parse.quote(ref)}", follow_redirects=True
+        )
+        response.raise_for_status()
+        return response.content
+
     async def _commit(
         self, *, repo: str, parent: str, message: str, files: Mapping[str, str]
     ) -> str:

@@ -8,6 +8,7 @@ orchestration change.
 
 import pathlib
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 import agents
 import attrs
@@ -38,7 +39,8 @@ def load_catalog(path: pathlib.Path) -> Catalog:
     Return the catalog declared in the YAML file. A missing or empty file is
     an empty catalog — both lists are optional.
 
-    :raises KeyError: if an entry has no ``name``.
+    :raises KeyError: if an entry has no ``name``, or a repository's checks
+        name no ``image``.
     :raises ValueError: if two specialists share a name — a typo fails at
         startup, never per request.
     """
@@ -64,10 +66,26 @@ def load_catalog(path: pathlib.Path) -> Catalog:
             description=str(entry.get("description", "")),
             base=str(entry.get("base", "main")),
             paths=tuple(str(pattern) for pattern in entry.get("paths") or ()),
+            checks=_checks(entry.get("checks")),
         )
         for entry in data.get("repos") or []
     )
     return Catalog(specialists=profiles, repos=repos)
+
+
+def _checks(entry: Mapping[str, Any] | None) -> changes.Checks | None:
+    """
+    Return a repository's declared checks, or None when it declares none.
+
+    :raises KeyError: if checks are declared without an ``image``.
+    """
+    if not entry:
+        return None
+    return changes.Checks(
+        image=str(entry["image"]),
+        commands=tuple(str(command) for command in entry.get("run") or ()),
+        network=bool(entry.get("network", False)),
+    )
 
 
 def mount(

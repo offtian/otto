@@ -18,6 +18,13 @@
 #   in code; leave CI config such as `.github/*` out), and `base` is the
 #   branch changes are proposed against (default: main). Repositories are
 #   reached with GITHUB_TOKEN, or read from LOCAL_REPOS_DIR without one.
+#   `checks` are the repository's own commands — a formatter, a validator,
+#   tests — run on each proposed change before the approver sees it, with
+#   what they said shown under the approval card (needs SANDBOX_ENABLED).
+#   They run in `image`, from the repository's root, on files a model
+#   edited: with no credentials, and no network unless `network: true`.
+#   Pull the image once beforehand — otherwise the first run spends its
+#   whole time budget downloading it.
 #
 # specialists:
 #   - name: coder
@@ -40,3 +47,7 @@
 #   - name: acme/infra-live
 #     description: Terraform for Coder workspace quotas and templates.
 #     paths: ["coder/*"]
+#     checks:
+#       image: hashicorp/terraform:1.9
+#       run:
+#         - terraform fmt -check -recursive

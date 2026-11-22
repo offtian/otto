@@ -10,6 +10,7 @@ the approval store and the use-cases are all real.
 import asyncio
 import json
 
+import attrs
 import pytest
 from agents.items import ModelResponse
 from agents.models.interface import Model
@@ -24,7 +25,7 @@ from otto import config
 from otto.application import dispatch, support
 from otto.domain.identity import users
 from otto.domain.support import agent as support_agent
-from otto.domain.support import approvals, catalog, changes, entities
+from otto.domain.support import approvals, catalog, changes, checks, entities
 from otto.settings import Settings
 from otto.vendors import slack as slack_vendor
 
@@ -52,6 +53,16 @@ CATALOG = catalog.Catalog(
     repos=(
         changes.RepoProfile(
             name="acme/infra-live", description="Workspace quotas.", paths=("coder/*",)
+        ),
+    ),
+)
+CHECKED_CATALOG = catalog.Catalog(
+    repos=(
+        attrs.evolve(
+            CATALOG.repos[0],
+            checks=changes.Checks(
+                image="hashicorp/terraform:1.9", commands=("terraform fmt -check",)
+            ),
         ),
     ),
 )
@@ -179,6 +190,27 @@ class FakeReviewer:
         return self.review_to_give
 
 
+class FakeChecker:
+    """
+    Stand-in for the pre-flight checks: answers with a fixed report (or
+    fails, or never answers) and records what it was asked to check.
+    """
+
+    def __init__(self, report=None, error=None, hangs=False):
+        self.report = report
+        self.error = error
+        self.hangs = hangs
+        self.seen = []
+
+    async def check(self, *, profile, files, ref):
+        self.seen.append((profile.name, ref, [file.after for file in files]))
+        if self.hangs:
+            await asyncio.Event().wait()
+        if self.error is not None:
+            raise self.error
+        return self.report
+
+
 @pytest.fixture
 def wire(monkeypatch):
     """
@@ -186,15 +218,18 @@ def wire(monkeypatch):
     repository, and a fake repository host; return (gateway, host).
     """
 
-    def _wire(model, reviewer=None, signing_key=""):
+    def _wire(model, reviewer=None, signing_key="", checker=None, **settings_overrides):
         gateway = FakeSlackGateway()
         host = FakeRepoHost()
+        # Only a repository that declares checks is ever checked.
+        declared = CHECKED_CATALOG if checker is not None else CATALOG
         cfg = config.Configuration(
             settings=Settings(
                 _env_file=None,
                 slack_triage_channel="C_TRIAGE",
                 support_user_ids="U_SUPPORT",
                 github_webhook_secret=signing_key,
+                **settings_overrides,
             ),
             slack=gateway,
             triage=slack_vendor.SlackTriageBackend(gateway=gateway, triage_channel="C_TRIAGE"),
@@ -206,15 +241,16 @@ def wire(monkeypatch):
             sailpoint_mcp=None,
             agent=catalog.mount(
                 support_agent.build_agent(model=model),
-                catalog=CATALOG,
+                catalog=declared,
                 model=model,
                 specialist_mcp_tools={},
                 repo_host=host,
                 signing_key=signing_key,
             ),
-            catalog=CATALOG,
+            catalog=declared,
             repo_host=host,
             change_reviewer=reviewer,
+            change_checker=checker,
         )
         monkeypatch.setattr(config, "get_config", lambda: cfg)
         return gateway, host
@@ -339,6 +375,82 @@ class TestRepositoryChange:
         # the moment of writing, whatever was approved
         assert host.pull_requests == []
         assert "outside the paths that may be changed" in json.dumps(model.inputs[-1], default=str)
+
+
+class TestPreflightChecks:
+    FAILED = checks.CheckReport(
+        results=(
+            checks.CheckResult(
+                command="terraform fmt -check", passed=False, output="coder/quotas.tfvars\n"
+            ),
+        )
+    )
+
+    async def test_the_approver_reads_what_the_repositorys_checks_said(self, wire):
+        # Given a repository that declares a check, which fails on the change
+        checker = FakeChecker(report=self.FAILED)
+        gateway, _host = wire(_proposing_model(), checker=checker)
+
+        # When the request pauses for approval
+        await _ask_for_more_cpu()
+
+        # Then the check ran on the file as the change would leave it, at
+        # the base branch — and the card is up, with what the check said in
+        # its thread
+        (repo, ref, contents) = checker.seen[0]
+        (note,) = _notes_under_the_card(gateway)
+        assert (repo, ref) == ("acme/infra-live", "main")
+        assert "ai            = { cpu = 32," in contents[0]
+        assert len(gateway.cards) == 1
+        assert "checks do not pass" in note
+        assert "`terraform fmt -check` — failed" in note
+        assert "coder/quotas.tfvars" in note
+
+    async def test_the_checks_and_the_second_opinion_are_both_shown(self, wire):
+        # Given checks that pass, and a reviewer with a concern
+        passed = checks.CheckReport(
+            results=(checks.CheckResult(command="terraform fmt -check", passed=True),)
+        )
+        reviewer = FakeReviewer(
+            changes.Review(approves=False, findings=("Name the team lead.",), reviewer="any-model")
+        )
+        gateway, _host = wire(
+            _proposing_model(), reviewer=reviewer, checker=FakeChecker(report=passed)
+        )
+
+        # When the request pauses for approval
+        await _ask_for_more_cpu()
+
+        # Then one note under the card carries both
+        (note,) = _notes_under_the_card(gateway)
+        assert "checks pass with this change" in note
+        assert "Name the team lead." in note
+
+    @pytest.mark.parametrize(
+        ("checker", "said"),
+        [
+            (
+                FakeChecker(error=OSError("Cannot connect to the Docker daemon")),
+                "could not be run",
+            ),
+            (FakeChecker(hangs=True), "did not finish in 0 seconds"),
+        ],
+        ids=["the sandbox is unavailable", "the checks never finish"],
+    )
+    async def test_checks_that_give_no_result_say_so_and_never_hold_up_the_approval(
+        self, wire, checker, said
+    ):
+        # Given a repository whose declared checks cannot be completed
+        gateway, _host = wire(_proposing_model(), checker=checker, sandbox_timeout_seconds=0)
+
+        # When the request pauses for approval
+        await _ask_for_more_cpu()
+
+        # Then the card is up, and the approver is told there is no result —
+        # not left to take silence for a pass
+        (note,) = _notes_under_the_card(gateway)
+        assert len(gateway.cards) == 1
+        assert said in note
 
 
 SIGNING_KEY = "test-webhook-secret"

@@ -30,17 +30,21 @@ Two ports. ``RepoHost`` is wherever repositories live: GitHub
 (``vendors/github``), or a local directory (``LocalRepoHost``) in dev.
 ``ChangeReviewer`` is an independent second opinion on a staged change,
 shown to the approver beside the card — advisory only: it never approves,
-blocks or alters anything (an agent on any model, ``reviewer``).
+blocks or alters anything (an agent on any model, ``reviewer``). What the
+repository's own tools say about a staged change is shown there too
+(``checks``).
 """
 
 import difflib
 import fnmatch
 import hashlib
 import hmac
+import io
 import json
 import pathlib
 import posixpath
 import re
+import tarfile
 import uuid
 from collections.abc import Awaitable, Mapping, Sequence
 from typing import Any, Protocol, TypedDict
@@ -67,6 +71,22 @@ _READ_LIMIT = 20_000
 
 
 @attrs.frozen
+class Checks:
+    """
+    What a repository runs on a change proposed to it, before a human is
+    asked to approve the change (``checks``).
+    """
+
+    # The container image the commands run in.
+    image: str
+    # Shell commands, each run from the repository's root. Exit code 0 passes.
+    commands: tuple[str, ...]
+    # Whether the commands may reach the network. Off unless the repository
+    # asks: they run on files a model edited.
+    network: bool = False
+
+
+@attrs.frozen
 class RepoProfile:
     """
     One repository in the catalog: Otto may read it and propose changes to
@@ -81,6 +101,8 @@ class RepoProfile:
     # Glob patterns of the only paths a change may touch. Empty = none: the
     # repository can be read but never changed.
     paths: tuple[str, ...] = ()
+    # Run on every change proposed to it, for the approver. None = nothing is.
+    checks: Checks | None = None
 
     def allows(self, path: str) -> bool:
         """
@@ -195,6 +217,14 @@ class RepoHost(Protocol):
         Add one commit with ``files`` (path → full new content) to an
         existing ``branch``, on top of the commit ``parent``. Raises when the
         branch has moved on from ``parent``: it is never forced.
+        """
+        ...
+
+    async def download(self, *, repo: str, ref: str) -> bytes:
+        """
+        Return the whole repository as it is at ``ref`` — a branch or a
+        commit — as a gzipped tar archive. Its files may sit under one
+        top-level directory.
         """
         ...
 
@@ -333,39 +363,20 @@ async def stage(
 
 
 async def stage_proposal(
-    *,
-    host: RepoHost,
-    profiles: Mapping[str, RepoProfile],
-    arguments: Mapping[str, Any],
-    revision: bool = False,
-    origin: entities.Origin | None = None,
-    signing_key: str = "",
+    *, host: RepoHost, profiles: Mapping[str, RepoProfile], arguments: Mapping[str, Any]
 ) -> tuple[RepoProfile, list[StagedFile]]:
     """
-    Return the repository profile and staged files of a pull request
+    Return the repository profile and staged files of an ``open_pull_request``
     proposal — the one check of whether it may and can be applied, run when
-    the approver is asked and again when the approved call executes.
+    the approver is asked and again when the approved call executes. A
+    proposal to revise a pull request has its own (``stage_revision``):
+    which of the two a paused call is, is told by the tool that was called,
+    never by what its arguments look like.
 
-    :param revision: whether the proposal is an ``update_pull_request`` call
-        (``stage_revision``) rather than an ``open_pull_request`` one. Told
-        by the tool that was called, never by what its arguments look like.
-    :param origin: the conversation proposing, and ``signing_key`` the key
-        its pull requests are signed with — what a revision is checked
-        against. A new pull request needs neither.
     :raises EditRejected: if the repository is not catalogued, the proposal
         is too long to show in full on its approval card, a path is outside
-        the allowlist, an edit does not apply, or the pull request to revise
-        is not one this conversation may revise.
+        the allowlist, or an edit does not apply.
     """
-    if revision:
-        profile, _, staged = await stage_revision(
-            host=host,
-            profiles=profiles,
-            arguments=arguments,
-            origin=origin,
-            signing_key=signing_key,
-        )
-        return profile, staged
     profile = _catalogued(profiles, str(arguments.get("repo", "")))
     ensure_reviewable(arguments)
     staged = await stage(host=host, profile=profile, edits=_edits(arguments.get("edits") or []))
@@ -385,6 +396,9 @@ async def stage_revision(
     ``update_pull_request`` proposal: its edits applied to the files as they
     are at the commit the pull request's branch is at.
 
+    :param origin: the conversation proposing, and ``signing_key`` the key
+        its pull requests are signed with — what the pull request is checked
+        against.
     :raises EditRejected: for everything ``stage_proposal`` refuses, and if
         the pull request is not one this conversation may revise
         (``find_revisable``).
@@ -586,13 +600,13 @@ def _rendered(arguments: Mapping[str, Any], *, revision: bool) -> str:
     for edit in arguments.get("edits") or []:
         if not isinstance(edit, Mapping):
             continue
-        removed = [f"- {line}" for line in _fenced(edit.get("old")).splitlines()]
-        added = [f"+ {line}" for line in _fenced(edit.get("new")).splitlines()]
+        removed = [f"- {line}" for line in fenced(edit.get("old")).splitlines()]
+        added = [f"+ {line}" for line in fenced(edit.get("new")).splitlines()]
         parts.append(f"*`{edit.get('path', '')}`*\n```" + "\n".join(removed + added) + "```")
     return "\n".join(parts)
 
 
-def _fenced(text: object) -> str:
+def fenced(text: object) -> str:
     """
     Return text safe to show inside a code fence: a fence of its own would
     end the block early and let an edit dress the rest of the card up.
@@ -611,18 +625,22 @@ def render_review(review: Review) -> str:
     model's words about untrusted content, so they are shown as plain text:
     nothing in them can mention a channel or pose as a link.
     """
-    reviewer = f" ({_plain(review.reviewer)})" if review.reviewer else ""
+    reviewer = f" ({plain(review.reviewer)})" if review.reviewer else ""
     if review.approves and not review.findings:
         return f":mag: *Second opinion*{reviewer}: no concerns with this change."
     verdict = "no objection, with notes" if review.approves else "look twice before approving"
     findings = "\n".join(
-        f"• {_plain(finding)[:_FINDING_LIMIT]}" for finding in review.findings[:_MAX_FINDINGS]
+        f"• {plain(finding)[:_FINDING_LIMIT]}" for finding in review.findings[:_MAX_FINDINGS]
     )
     icon = ":mag:" if review.approves else ":warning:"
     return f"{icon} *Second opinion*{reviewer}: {verdict}.\n{findings}"
 
 
-def _plain(text: str) -> str:
+def plain(text: str) -> str:
+    """
+    Return text that Slack shows as written: nothing in it can mention a
+    channel or a person, or pose as a link.
+    """
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
@@ -1084,6 +1102,12 @@ class LocalRepoHost:
     async def get_pull_request(self, *, repo: str, number: int) -> Mapping[str, Any] | None:
         return None
 
+    async def download(self, *, repo: str, ref: str) -> bytes:
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+            tar.add(self._resolve(repo, ""), arcname=".", filter=_without_history)
+        return archive.getvalue()
+
     async def push_commit(
         self, *, repo: str, branch: str, parent: str, message: str, files: Mapping[str, str]
     ) -> None:
@@ -1097,6 +1121,15 @@ class LocalRepoHost:
         if not target.is_relative_to(base) or not base.is_relative_to(self.root.resolve()):
             raise EditRejected(f"{path} is not a path inside {repo}")
         return target
+
+
+def _without_history(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
+    """
+    Leave a checked-out repository's ``.git`` directory out of its archive:
+    its history is not part of its files. ``.gitignore`` and ``.github``
+    are, and stay.
+    """
+    return None if member.name == "./.git" or member.name.startswith("./.git/") else member
 
 
 def _edits(arguments: Sequence[Mapping[str, Any]]) -> list[FileEdit]:

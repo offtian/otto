@@ -29,6 +29,7 @@ from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals as support_approvals
 from otto.domain.support import catalog as support_catalog
 from otto.domain.support import changes as support_changes
+from otto.domain.support import checks as support_checks
 from otto.domain.support import consolidation as support_consolidation
 from otto.domain.support import followups as support_followups
 from otto.domain.support import history as support_history
@@ -39,6 +40,7 @@ from otto.domain.support import policy as support_policy
 from otto.domain.support import reviewer as support_reviewer
 from otto.settings import Settings, settings
 from otto.utils import logs
+from otto.vendors import docker as docker_vendor
 from otto.vendors import github as github_vendor
 from otto.vendors import jira as jira_vendor
 from otto.vendors import llm, mcp
@@ -132,6 +134,9 @@ class Configuration(pydantic.BaseModel):
     # An independent second opinion on a proposed change, shown to the
     # approver under the card; None = the approver gets the edits alone.
     change_reviewer: pydantic.SkipValidation[support_changes.ChangeReviewer | None] = None
+    # What a repository's own checks say about a proposed change, shown to
+    # the approver under the card; None = nothing is run.
+    change_checker: pydantic.SkipValidation[support_checks.ChangeChecker | None] = None
 
     def load_memory(self) -> None:
         """
@@ -248,6 +253,20 @@ class Configuration(pydantic.BaseModel):
             ),
             model_name=self.settings.reviewer_model,
             host=self.repo_host,
+        )
+
+    def load_checker(self) -> None:
+        """
+        Wire the pre-flight checks when the sandbox is enabled and there are
+        repositories to check: each runs the checks its catalog entry
+        declares, in a throwaway Docker container.
+        """
+        if not self.settings.sandbox_enabled or self.repo_host is None:
+            return
+        self.change_checker = support_checks.SandboxChecker(
+            host=self.repo_host,
+            sandbox=docker_vendor.DockerSandbox(),
+            timeout_seconds=self.settings.sandbox_timeout_seconds,
         )
 
     def load_stores(self) -> None:
@@ -398,6 +417,7 @@ def get_config() -> Configuration:
     config.load_model()
     config.load_vendors()
     config.load_reviewer()
+    config.load_checker()
     config.load_stores()
     config.load_catalog()
     config.load_mcps()
