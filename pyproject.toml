@@ -132,6 +132,7 @@ ignore = [
     "A005",    # module names may shadow stdlib (logs.py) — module-import style disambiguates
     "ARG",     # unused arguments are normal in interfaces, callbacks and overrides
     "BLE001",  # broad except is fine at boundaries when logged or re-raised
+    "CPY001",  # no per-file copyright headers
     "EM",      # exception message literals are fine (see also TRY003)
     "ERA001",  # commented-out code is caught in review, not by regex
     "FIX",     # FIXME/TODO markers are allowed to live in the codebase
@@ -143,6 +144,7 @@ ignore = [
     "PLR0911", # complexity counters
     "PLR0912", # complexity counters
     "PLR0913", # complexity counters
+    "PLR0917", # complexity counters
     "PLR2004", # magic-value comparisons: fine for status codes and small constants
     "PLR5501", # collapsible else-if can read better spelled out
     "PLR6301", # "could be a static method" — methods stay methods

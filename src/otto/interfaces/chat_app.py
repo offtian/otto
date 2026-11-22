@@ -516,8 +516,10 @@ _EXAMPLES = {
     "Access request edge cases": (
         "I need access to Workday.",
         "I can't get into the Snowflake reporting warehouse — it says access denied.",
-        "I'm on the Marketing team and need admin access to the production "
-        "Kubernetes cluster to fix tonight's deploy. Justification: unblock the release.",
+        (
+            "I'm on the Marketing team and need admin access to the production "
+            "Kubernetes cluster to fix tonight's deploy. Justification: unblock the release."
+        ),
     ),
     "Escalation & guardrails": (
         "This is urgent — my laptop won't boot at all. Please get me a human.",
