@@ -33,6 +33,7 @@ from otto.domain.support import inbox as support_inbox
 from otto.domain.support import memory as support_memory
 from otto.domain.support import outbox as support_outbox
 from otto.domain.support import policy as support_policy
+from otto.domain.support import reviewer as support_reviewer
 from otto.settings import Settings, settings
 from otto.utils import logs
 from otto.vendors import cognee as cognee_vendor
@@ -229,6 +230,24 @@ class Configuration(pydantic.BaseModel):
             else None
         )
 
+    def load_reviewer(self) -> None:
+        """
+        Wire the change reviewer when a reviewer model is named and there are
+        repositories to review: an agent on that model, through the same
+        gateway as the agents, with read-only access to the repository host.
+        """
+        if not self.settings.reviewer_model or self.repo_host is None:
+            return
+        self.change_reviewer = support_reviewer.AgentChangeReviewer(
+            model=llm.build_model(
+                base_url=self.settings.llm_base_url,
+                api_key=self.settings.llm_api_key,
+                model_name=self.settings.reviewer_model,
+            ),
+            model_name=self.settings.reviewer_model,
+            host=self.repo_host,
+        )
+
     def load_stores(self) -> None:
         """
         Wire the directory and the approval, inbox, outbox and follow-up stores:
@@ -351,6 +370,7 @@ def get_config() -> Configuration:
     config = Configuration(settings=settings)
     config.load_model()
     config.load_vendors()
+    config.load_reviewer()
     config.load_stores()
     config.load_catalog()
     config.load_mcps()

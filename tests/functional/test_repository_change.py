@@ -7,6 +7,7 @@ and the repository host are faked; the graph, the agent, the change tools,
 the approval store and the use-cases are all real.
 """
 
+import asyncio
 import json
 
 import pytest
@@ -367,6 +368,24 @@ class TestSecondOpinion:
         await _ask_for_more_cpu()
 
         # Then the card is up and waiting, just without a second opinion
+        assert len(gateway.cards) == 1
+        assert _notes_under_the_card(gateway) == []
+
+    async def test_a_reviewer_that_never_answers_does_not_keep_the_card_waiting(
+        self, wire, monkeypatch
+    ):
+        # Given a reviewer that hangs, and a short wait for second opinions
+        class HangingReviewer:
+            async def review(self, **kwargs):
+                await asyncio.Event().wait()
+
+        monkeypatch.setattr(support, "_REVIEW_TIMEOUT_SECONDS", 0.01)
+        gateway, _host = wire(_proposing_model(), reviewer=HangingReviewer())
+
+        # When the request pauses for approval
+        await _ask_for_more_cpu()
+
+        # Then the card goes up without one once the wait runs out
         assert len(gateway.cards) == 1
         assert _notes_under_the_card(gateway) == []
 
