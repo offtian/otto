@@ -30,6 +30,7 @@ from otto.domain.support import catalog as support_catalog
 from otto.domain.support import changes as support_changes
 from otto.domain.support import consolidation as support_consolidation
 from otto.domain.support import followups as support_followups
+from otto.domain.support import history as support_history
 from otto.domain.support import inbox as support_inbox
 from otto.domain.support import memory as support_memory
 from otto.domain.support import outbox as support_outbox
@@ -121,6 +122,9 @@ class Configuration(pydantic.BaseModel):
     # Consolidation: decides what of a resolved conversation is remembered.
     # Wired with memory; without it nothing is remembered.
     case_distiller: pydantic.SkipValidation[support_memory.CaseDistiller | None] = None
+    # Per-requester history: which notes each requester's resolved cases
+    # were filed under. None = not kept; recall names no one.
+    case_history: pydantic.SkipValidation[support_history.CaseHistory | None] = None
     # Where the catalogued repositories are read and proposed against;
     # None = no repository tools mount.
     repo_host: pydantic.SkipValidation[support_changes.RepoHost | None] = None
@@ -131,13 +135,16 @@ class Configuration(pydantic.BaseModel):
     def load_memory(self) -> None:
         """
         Wire long-term memory when it is enabled and there is a database to
-        keep it in: the store of case notes, and the distiller that decides
-        what goes into it, on the agents' own model.
+        keep it in: the store of case notes, the distiller that decides what
+        goes into it, on the agents' own model — and, only when asked for,
+        the record of which requester had which case.
         """
         if not self.settings.memory_enabled or not self.settings.database_url:
             return
         self.memory = support_memory.PostgresMemoryStore(database=db.get_db())
         self.case_distiller = support_consolidation.AgentCaseDistiller(model=self.model)
+        if self.settings.memory_history_enabled:
+            self.case_history = support_history.PostgresCaseHistory(database=db.get_db())
 
     async def load_agents(self) -> None:
         """

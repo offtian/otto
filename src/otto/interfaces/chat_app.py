@@ -47,6 +47,7 @@ from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals as support_approvals
 from otto.domain.support import catalog as support_catalog
 from otto.domain.support import entities as support_entities
+from otto.domain.support import history as support_history
 from otto.domain.support import memory as support_memory
 from otto.settings import settings
 from otto.utils import telemetry
@@ -220,6 +221,8 @@ def _wire_runtime(database: databases.Database) -> config.Configuration:
     cfg.approvals = support_approvals.PostgresApprovalStore(database=database)
     if settings.memory_enabled:
         cfg.memory = support_memory.PostgresMemoryStore(database=database)
+    if cfg.case_history is not None:
+        cfg.case_history = support_history.PostgresCaseHistory(database=database)
     # The chat delivers inline, never through the outbox: a queued chat reply
     # would be retried by the server process into a nonexistent Slack channel.
     cfg.outbox = None

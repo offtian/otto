@@ -192,6 +192,7 @@ def wire(monkeypatch):
         access_agent=None,
         memory=None,
         case_distiller=None,
+        case_history=None,
         **settings_overrides,
     ):
         gateway = FakeSlackGateway()
@@ -216,6 +217,7 @@ def wire(monkeypatch):
             intent_classifier=intent_classifier,
             memory=memory,
             case_distiller=case_distiller,
+            case_history=case_history,
         )
         monkeypatch.setattr(config, "get_config", lambda: cfg)
         return cfg, gateway, model
@@ -574,6 +576,43 @@ class TestKnowledgeAnswerFeedback:
         assert memory.confirmed == [KNOWN_CASE.id]
         assert memory.remembered == []
 
+    async def test_a_yes_vote_files_the_case_under_whoever_confirmed_it(self, wire):
+        # Given requester history kept beside a memory that already holds
+        # this fix, and a distiller that recognizes the conversation as it
+        memory = FakeMemoryStore(known=[KNOWN_CASE])
+        history = FakeCaseHistory()
+        distiller = mock.AsyncMock()
+        distiller.distill.return_value = support_memory.CaseNote(restates=KNOWN_CASE.id)
+        _cfg, gateway, _ = wire(
+            ScriptedModel([]), memory=memory, case_distiller=distiller, case_history=history
+        )
+        gateway.thread = list(RESOLVED_THREAD)
+
+        # When the requester votes that the answer helped
+        await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
+
+        # Then the note is recorded against the voter — their id and the
+        # note's, nothing from the conversation
+        assert history.recorded == [("U_REQ", KNOWN_CASE.id)]
+
+    async def test_a_new_note_is_filed_under_the_voter_too(self, wire):
+        # Given requester history kept beside an empty memory, and a
+        # distiller that writes a new note
+        memory = FakeMemoryStore()
+        history = FakeCaseHistory()
+        distiller = mock.AsyncMock()
+        distiller.distill.return_value = support_memory.CaseNote(note="Symptom: VPN drops.")
+        _cfg, gateway, _ = wire(
+            ScriptedModel([]), memory=memory, case_distiller=distiller, case_history=history
+        )
+        gateway.thread = list(RESOLVED_THREAD)
+
+        # When the requester votes that the answer helped
+        await support.record_feedback(helpful=True, origin=ORIGIN, voter_id="U_REQ")
+
+        # Then the case is filed under the id memory gave the new note
+        assert history.recorded == [("U_REQ", 1)]
+
     async def test_a_conversation_with_nothing_reusable_is_not_remembered(self, wire):
         # Given a case distiller that finds nothing worth keeping
         memory = FakeMemoryStore()
@@ -809,6 +848,28 @@ class TestApprovalSweep:
 
         # Then every note last seen more than ninety days before is forgotten
         assert memory.purge_cutoffs == [now - timedelta(days=90)]
+
+
+class TestRequesterHistoryRetention:
+    async def test_who_had_which_case_is_kept_for_its_own_shorter_window(self, wire):
+        # Given requester history kept for a week beside a memory kept a year
+        memory = FakeMemoryStore()
+        history = FakeCaseHistory()
+        wire(
+            ScriptedModel([]),
+            memory=memory,
+            case_history=history,
+            memory_history_days=7,
+            memory_retention_days=365,
+        )
+        now = datetime(2026, 11, 22, tzinfo=UTC)
+
+        # When the maintenance sweep runs
+        await support.sweep_approvals(now=now)
+
+        # Then each is purged at its own cutoff
+        assert history.purge_cutoffs == [now - timedelta(days=7)]
+        assert memory.purge_cutoffs == [now - timedelta(days=365)]
 
 
 class TestAssistantMode:
@@ -1095,6 +1156,23 @@ class FakeMemoryStore:
     def _fail_if_down(self):
         if self.error is not None:
             raise self.error
+
+
+class FakeCaseHistory:
+    """
+    Records which requester each case was filed under, and each purge.
+    """
+
+    def __init__(self):
+        self.recorded = []
+        self.purge_cutoffs = []
+
+    async def record(self, *, requester_id, memory_id):
+        self.recorded.append((requester_id, memory_id))
+
+    async def purge(self, *, cutoff):
+        self.purge_cutoffs.append(cutoff)
+        return 0
 
 
 class FakeIntentClassifier:

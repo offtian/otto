@@ -8,7 +8,17 @@ this file grows past a handful of tables.
 
 from datetime import UTC, datetime
 
-from sqlalchemy import TIMESTAMP, Column, DateTime, ForeignKey, Index, String, Text, text
+from sqlalchemy import (
+    TIMESTAMP,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
 from sqlmodel import Field, SQLModel
 
 
@@ -174,6 +184,27 @@ class MemoryNoteRecord(SQLModel, table=True):
     times_seen: int = 1
     first_seen: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
     last_seen: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+
+
+class RequesterCaseRecord(SQLModel, table=True):
+    """
+    One resolved case of one requester: which de-identified note it was filed
+    under, and when. The only place memory names a person — written only when
+    requester history is enabled, kept ``MEMORY_HISTORY_DAYS``, and deleted
+    with its note.
+    """
+
+    __tablename__ = "requester_cases"
+    __table_args__ = (Index("ix_requester_cases_requester", "requester_id", "happened_at"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    requester_id: str
+    memory_id: int = Field(
+        sa_column=Column(
+            Integer, ForeignKey("memory_notes.id", ondelete="CASCADE"), nullable=False
+        )
+    )
+    happened_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
 
 
 class RuntimeFlagRecord(SQLModel, table=True):

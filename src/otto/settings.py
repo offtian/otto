@@ -120,6 +120,12 @@ class Settings(BaseSettings):
     # A note that no resolved case has matched for this many days is
     # forgotten by the maintenance sweep.
     memory_retention_days: int = 365
+    # Per-requester history: also keep which note each requester's resolved
+    # case was filed under, so a repeat is recognised. The one identified
+    # record memory keeps (requester id, note id, timestamp) — off by
+    # default, needs memory_enabled, and kept only this many days.
+    memory_history_enabled: bool = False
+    memory_history_days: int = 30
 
     # The catalog: a YAML file of two flat lists — the specialists the
     # general agent may consult and the repositories it may propose changes
