@@ -1,10 +1,10 @@
 """
 The support flow graph: one classify node routes each inbound request to the
-agent node that owns it — the access specialist, a team-owned owner agent
-(resolved from the services the request mentions), or the general agent.
-Agent nodes are the only ones that may suspend (HITL) — ``support`` persists
-the suspended node name plus ``dump_state``'s durable subset on the
-approval, and a human decision re-enters the graph exactly there.
+agent node that owns it — the access specialist, or the general agent, which
+carries everything else (knowledge, runbooks, the catalogued specialists and
+repositories). Agent nodes are the only ones that may suspend (HITL) —
+``support`` persists the suspended node name on the approval, and a human
+decision re-enters the graph exactly there.
 
 The classify node is also the retrieval gate: the same reading says whether
 long-term memory is worth searching for this request, and only then are past
@@ -13,12 +13,9 @@ and, worse, lets irrelevant memories bias the answer.
 
 State keys the nodes read: ``text`` (the raw request, for the classifier),
 ``input`` (the rebuilt conversation input, plus any recalled past cases),
-``ctx`` (the ``SupportContext``), ``team`` (set by classify when an owning
-team resolved), and optionally ``resume`` (a paused run's serialized state
-plus the human decision).
+``ctx`` (the ``SupportContext``), and optionally ``resume`` (a paused run's
+serialized state plus the human decision).
 """
-
-import json
 
 import agents
 
@@ -31,7 +28,6 @@ from otto.vendors import llm
 
 ACCESS = "access"
 GENERAL = "general"
-OWNER = "owner"
 
 # How many recalled past cases may ride along with one request.
 _RECALL_LIMIT = 3
@@ -41,23 +37,22 @@ async def _classify(state: graph.State) -> graph.NodeResult:
     """
     Route the request to a flow node, recalling past cases on the way if
     the reading says they would help. Fail-open: no classifier, a classifier
-    error, an unresolved team, or a plain question all land on the general
+    error, or anything that is not an access request lands on the general
     agent — misrouting can only cost focus, never capability.
     """
     cfg = config.get_config()
     # A reading is worth its call only if something acts on it: a flow to
     # route to, or a memory to gate.
-    useful = cfg.access_agent is not None or bool(cfg.team_agents) or cfg.memory is not None
+    useful = cfg.access_agent is not None or cfg.memory is not None
     if cfg.intent_classifier is None or not useful:
         return graph.Goto(GENERAL)
     reading = await cfg.intent_classifier.classify(text=state["text"])
     await _recall(state, cfg=cfg, query=reading.recall)
-    node, team = _route(cfg=cfg, reading=reading)
-    if team:
-        state["team"] = team
-    # Only the intent and resolved team are logged, never the extracted
-    # services — those are derived from untrusted message text (NFR2).
-    logs.log_event("intent_routed", params={"intent": reading.intent, "node": node, "team": team})
+    # Access requests get the agent that does only the gated submission
+    # sequence; the gate itself is the same on either agent.
+    access = reading.intent == llm.INTENT_ACCESS and cfg.access_agent is not None
+    node = ACCESS if access else GENERAL
+    logs.log_event("intent_routed", params={"intent": reading.intent, "node": node})
     return graph.Goto(node)
 
 
@@ -89,37 +84,11 @@ async def _recall(state: graph.State, *, cfg: config.Configuration, query: str) 
     logs.log_event("memory_recalled", params={"passages": len(recalled)})
 
 
-def _route(cfg: config.Configuration, *, reading: llm.IntentReading) -> tuple[str, str]:
-    """
-    Return (node, team) for one intent reading. Access requests beat team
-    ownership — the gated submission flow is never diverted; every other
-    intent is owned by whichever team owns the services it mentions.
-    """
-    if reading.intent == llm.INTENT_ACCESS and cfg.access_agent is not None:
-        return ACCESS, ""
-    team = (
-        cfg.team_registry.resolve(services=reading.services)
-        if cfg.team_registry is not None and reading.services
-        else None
-    )
-    if team is not None and cfg.team_agents and team.name in cfg.team_agents:
-        return OWNER, team.name
-    return GENERAL, ""
-
-
 async def _access(state: graph.State) -> graph.NodeResult:
     cfg = config.get_config()
     # A pause can outlive a deploy: if the access agent is gone on resume,
     # the general agent (same gated tools) still carries the decision out.
     return await _run_agent(cfg.access_agent or cfg.agent, state)
-
-
-async def _owner(state: graph.State) -> graph.NodeResult:
-    cfg = config.get_config()
-    # A pause can outlive a profile change: a vanished team resumes on the
-    # general agent rather than dropping the human's decision.
-    agent = (cfg.team_agents or {}).get(state.get("team", ""))
-    return await _run_agent(agent or cfg.agent, state)
 
 
 async def _general(state: graph.State) -> graph.NodeResult:
@@ -163,29 +132,8 @@ async def _run_agent(
     return graph.Done(output=result)
 
 
-def dump_state(state: graph.State) -> str:
-    """
-    Serialize the durable subset of flow state for a paused run — only the
-    primitives resume needs to rebuild the right agent, never SDK objects
-    (the pinned SDK version already couples the RunState blob; this must
-    not add to it). Empty string = nothing beyond the node name.
-    """
-    team = state.get("team", "")
-    return json.dumps({"team": team}) if team else ""
-
-
-def load_state(raw: str) -> graph.State:
-    """
-    Return a fresh flow state from a paused run's serialized subset.
-    """
-    if not raw:
-        return {}
-    data = json.loads(raw)
-    return {"team": data["team"]} if data.get("team") else {}
-
-
 SUPPORT = graph.Graph(
     name="support",
     start="classify",
-    nodes={"classify": _classify, ACCESS: _access, OWNER: _owner, GENERAL: _general},
+    nodes={"classify": _classify, ACCESS: _access, GENERAL: _general},
 )

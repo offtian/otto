@@ -1,6 +1,6 @@
 """
 Changes to code and configuration: how Otto turns a provisioning or
-engineering-change request into a pull request on a repository a team owns.
+engineering-change request into a pull request on a catalogued repository.
 
 An agent never writes to a repository directly. It reads files, proposes
 exact-match edits, and the one write — ``open_pull_request`` — is a gated
@@ -50,7 +50,8 @@ _READ_LIMIT = 20_000
 @attrs.frozen
 class RepoProfile:
     """
-    One repository a team owns and Otto may propose changes to.
+    One repository in the catalog: Otto may read it and propose changes to
+    the paths it allows.
     """
 
     # "owner/name", as the host addresses it.
@@ -284,6 +285,32 @@ def pull_request_body(*, summary: str, context: support_agent.SupportContext) ->
     return body
 
 
+_GUIDANCE = """\
+- Repositories: you can propose changes to these, as pull requests:
+{repos}
+  For a provisioning or configuration request they cover, read the relevant
+  files first, call preview_change until your edits apply cleanly, then call
+  open_pull_request. It always needs a human approval — tell the user it was
+  sent for approval and never promise the outcome. A pull request exists
+  only when open_pull_request returned its address: never state that you
+  opened or will open one as text alone. Collect what the change needs from
+  the user — never invent a name, a size or an owner.
+"""
+
+
+def guidance(repos: Sequence[RepoProfile]) -> str:
+    """
+    Return what the agent that mounts the repository tools is told about
+    them: which repositories, which paths, and the order of work.
+    """
+    listed = "\n".join(
+        f"  - {repo.name} (branch {repo.base}): {repo.description or 'no description'} "
+        f"Changeable paths: {', '.join(repo.paths) or 'none'}."
+        for repo in repos
+    )
+    return _GUIDANCE.format(repos=listed)
+
+
 class EditArguments(TypedDict):
     """
     One edit as an agent passes it to the repository tools.
@@ -300,8 +327,8 @@ _UNREACHABLE = "The repository could not be reached — say so and offer to esca
 @attrs.frozen
 class RepoTools:
     """
-    The repository tools of one owner agent, bound to the repositories its
-    team owns and the host they live on. Listing, reading and previewing run
+    The repository tools, bound to the catalogued repositories and the host
+    they live on. Listing, reading and previewing run
     freely; ``open_pull_request`` — the only write — always pauses for
     approval, so these belong on top-level agents only.
 
@@ -326,15 +353,15 @@ class RepoTools:
 
     async def list_repo_files(self, repo: str, path: str) -> str:
         """
-        List the files and directories directly under a path of a repository
-        you own ("" for its root). Directories end in "/".
+        List the files and directories directly under a path of a catalogued
+        repository ("" for its root). Directories end in "/".
         """
         return await _answered("list_repo_files", self._list(repo=repo, path=path))
 
     async def read_repo_file(self, repo: str, path: str) -> str:
         """
-        Return the content of one file of a repository you own, as it is on
-        the branch changes are proposed against. Read a file before you
+        Return the content of one file of a catalogued repository, as it is
+        on the branch changes are proposed against. Read a file before you
         propose an edit to it.
         """
         return await _answered("read_repo_file", self._read(repo=repo, path=path))
@@ -359,7 +386,7 @@ class RepoTools:
     ) -> str:
         """
         Open a pull request with a set of edits (the same shape as
-        preview_change) on a repository you own. Requires human approval
+        preview_change) on a catalogued repository. Requires human approval
         before it runs; the approver sees these exact edits. summary is the
         pull request description: what changes and why, for the reviewer.
         """
@@ -438,7 +465,7 @@ async def _answered(tool: str, operation: Awaitable[str]) -> str:
 
 def build_change_tools(*, repos: Sequence[RepoProfile], host: RepoHost) -> list[agents.Tool]:
     """
-    Return the repository tools for an agent whose team owns ``repos``.
+    Return the repository tools over ``repos`` for one top-level agent.
     """
     return RepoTools(profiles={profile.name: profile for profile in repos}, host=host).as_tools()
 

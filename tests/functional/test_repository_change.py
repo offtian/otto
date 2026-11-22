@@ -1,10 +1,10 @@
 """
-End-to-end repository change: a provisioning request routes to the owning
-team's agent, which reads the repository, previews its edit and asks to open
-a pull request — the run pauses, the approval card shows the exact edit, and
-only an approved click commits it and opens the pull request. Only the model,
-the classifier, Slack and the repository host are faked; the graph, the owner
-agent, the change tools, the approval store and the use-cases are all real.
+End-to-end repository change: for a provisioning request the general agent
+reads a catalogued repository, previews its edit and asks to open a pull
+request — the run pauses, the approval card shows the exact edit, and only an
+approved click commits it and opens the pull request. Only the model, Slack
+and the repository host are faked; the graph, the agent, the change tools,
+the approval store and the use-cases are all real.
 """
 
 import json
@@ -23,9 +23,8 @@ from otto import config
 from otto.application import support
 from otto.domain.identity import users
 from otto.domain.support import agent as support_agent
-from otto.domain.support import approvals, changes, entities, teams
+from otto.domain.support import approvals, catalog, changes, entities
 from otto.settings import Settings
-from otto.vendors import llm
 from otto.vendors import slack as slack_vendor
 
 
@@ -48,25 +47,14 @@ PROPOSAL = {
     "edits": [RAISE_AI_CPU],
 }
 
-REGISTRY = teams.TeamRegistry(
-    teams=(
-        teams.TeamProfile(
-            name="platform",
-            description="Owns Coder and its infrastructure",
-            instructions="You own developer-platform issues.",
-            services=("coder",),
-            repos=(
-                changes.RepoProfile(
-                    name="acme/infra-live",
-                    description="Workspace quotas.",
-                    paths=("coder/*",),
-                ),
-            ),
+CATALOG = catalog.Catalog(
+    repos=(
+        changes.RepoProfile(
+            name="acme/infra-live", description="Workspace quotas.", paths=("coder/*",)
         ),
     ),
 )
 ORIGIN = entities.SlackThread(channel_id="D1", thread_ts="1.0")
-PROVISIONING_CODER = llm.IntentReading(intent="provisioning", services=("coder",))
 
 
 def _text(message: str):
@@ -163,15 +151,10 @@ class FakeRepoHost:
         return PULL_REQUEST_URL
 
 
-class FakeIntentClassifier:
-    async def classify(self, *, text):
-        return PROVISIONING_CODER
-
-
 @pytest.fixture
 def wire(monkeypatch):
     """
-    Wire a full Configuration around a scripted model, a team that owns one
+    Wire a full Configuration around a scripted model, a catalog with one
     repository, and a fake repository host; return (gateway, host).
     """
 
@@ -190,12 +173,14 @@ def wire(monkeypatch):
             model=model,
             confluence_mcp=None,
             sailpoint_mcp=None,
-            agent=support_agent.build_agent(model=model),
-            intent_classifier=FakeIntentClassifier(),
-            team_registry=REGISTRY,
-            team_agents=teams.build_team_agents(
-                registry=REGISTRY, model=model, specialist_mcp_tools={}, repo_host=host
+            agent=catalog.mount(
+                support_agent.build_agent(model=model),
+                catalog=CATALOG,
+                model=model,
+                specialist_mcp_tools={},
+                repo_host=host,
             ),
+            catalog=CATALOG,
             repo_host=host,
         )
         monkeypatch.setattr(config, "get_config", lambda: cfg)
@@ -237,7 +222,7 @@ def _proposing_model(*, proposal=None, after_decision="Done."):
 
 class TestRepositoryChange:
     async def test_the_request_pauses_on_a_card_that_shows_the_exact_edit(self, wire):
-        # Given a provisioning request the owner agent turns into a proposal
+        # Given a provisioning request the agent turns into a proposal
         gateway, host = wire(_proposing_model())
 
         # When the request is handled
@@ -253,7 +238,7 @@ class TestRepositoryChange:
         assert "+ ai            = { cpu = 32," in card["summary"]
 
     async def test_the_agent_previewed_a_real_diff_before_asking(self, wire):
-        # Given a provisioning request the owner agent turns into a proposal
+        # Given a provisioning request the agent turns into a proposal
         model = _proposing_model()
         wire(model)
 
@@ -303,8 +288,8 @@ class TestRepositoryChange:
         assert any("not approved" in text for _, _, text in gateway.messages)
 
     async def test_approval_cannot_carry_a_change_past_the_path_allowlist(self, wire):
-        # Given a proposal that edits CI configuration, outside the team's
-        # allowed paths — and an approver who clicks approve anyway
+        # Given a proposal that edits CI configuration, outside the
+        # repository's allowed paths — and an approver who clicks approve anyway
         off_limits = PROPOSAL | {
             "edits": [{"path": ".github/workflows/apply.yml", "old": "", "new": "on: push\n"}]
         }

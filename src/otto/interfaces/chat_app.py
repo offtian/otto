@@ -1,9 +1,9 @@
 """
 Streamlit chat surface that mimics the Slack integration on the host: the
-real support flow graph (intent routing, the access specialist, team-owned
-owner agents), the same telemetry pipeline (OTLP → Tempo/Langfuse), and
-the same HITL approval round-trip (serialized RunState, approve/reject,
-resume) — minus Slack itself.
+real support flow graph (intent routing, the access specialist, the
+catalogued specialists and repositories), the same telemetry pipeline (OTLP →
+Tempo/Langfuse), and the same HITL approval round-trip (serialized RunState,
+approve/reject, resume) — minus Slack itself.
 
 Conversations are durable, in the production Postgres: history lives in the
 Agents SDK's session store (``agent_sessions``/``agent_messages``), and the
@@ -45,8 +45,8 @@ from otto.data import models as data_models
 from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals as support_approvals
+from otto.domain.support import catalog as support_catalog
 from otto.domain.support import entities as support_entities
-from otto.domain.support import teams as support_teams
 from otto.settings import settings
 from otto.utils import telemetry
 from otto.vendors import llm
@@ -193,10 +193,9 @@ def _wire_runtime(database: databases.Database) -> config.Configuration:
         model_name=settings.llm_model,
     )
     agents.set_tracing_disabled(disabled=False)
-    cfg.agent = support_agent.build_agent(model=model)
-    cfg.access_agent = support_agent.build_access_agent(model=model)
-    cfg.team_agents = support_teams.build_team_agents(
-        registry=cfg.team_registry or support_teams.TeamRegistry(),
+    cfg.agent = support_catalog.mount(
+        support_agent.build_agent(model=model),
+        catalog=cfg.catalog,
         model=model,
         # The dev chat mounts no specialist MCP servers — specialists run
         # on their instructions alone.
@@ -204,6 +203,7 @@ def _wire_runtime(database: databases.Database) -> config.Configuration:
         # Rebuilt here like every other loop-bound client.
         repo_host=config.build_repo_host(settings),
     )
+    cfg.access_agent = support_agent.build_access_agent(model=model)
     cfg.intent_classifier = llm.build_intent_classifier(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
@@ -327,11 +327,10 @@ def _context(cfg: config.Configuration) -> support_agent.SupportContext:
     )
 
 
-async def _run_turn(chat_id: str, question: str) -> tuple[graph.Suspend | graph.Done, str]:
+async def _run_turn(chat_id: str, question: str) -> graph.Suspend | graph.Done:
     """
-    Run one turn through the real support flow graph — intent routing, team
-    resolution, and all — and return the outcome plus the durable flow state
-    (a suspended turn persists it on the approval, exactly like Slack).
+    Run one turn through the real support flow graph — intent routing, the
+    retrieval gate, and all — and return the outcome.
     """
     async with db.database() as database:
         cfg = _wire_runtime(database)
@@ -341,18 +340,15 @@ async def _run_turn(chat_id: str, question: str) -> tuple[graph.Suspend | graph.
             "ctx": _context(cfg),
             "session": _DatabaseSession(chat_id, database),
         }
-        outcome = await flows.SUPPORT.run(state)
-        return outcome, flows.dump_state(state)
+        return await flows.SUPPORT.run(state)
 
 
-async def _pause(
-    chat_id: str, result: agents.RunResult, *, question: str, node: str, graph_state: str
-) -> None:
+async def _pause(chat_id: str, result: agents.RunResult, *, question: str, node: str) -> None:
     """
     Save the interrupted run as a real ``PendingApproval`` in the production
-    approval store (D1) — including the flow-graph node and durable flow
-    state, so the resume re-enters the graph exactly like Slack — and note
-    its id on the session row so the card survives reruns and restarts.
+    approval store (D1) — including the flow-graph node, so the resume
+    re-enters the graph exactly like Slack — and note its id on the session
+    row so the card survives reruns and restarts.
     """
     tool, args = support_app.paused_call_fields(result=result)
     approval_id = str(uuid.uuid4())
@@ -368,7 +364,6 @@ async def _pause(
                 tool_arguments=args,
                 run_state_json=result.to_state().to_string(),
                 node=node,
-                graph_state_json=graph_state,
                 channel=_CHANNEL,
                 card_channel=_CHANNEL,
                 card_ts=chat_id,
@@ -465,9 +460,7 @@ def _bubbles(items: list[Any]) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
     return bubbles, tuple(steps)
 
 
-def _absorb(
-    outcome: "graph.Suspend | graph.Done", graph_state: str, *, chat_id: str, question: str
-) -> None:
+def _absorb(outcome: "graph.Suspend | graph.Done", *, chat_id: str, question: str) -> None:
     result = outcome.payload if isinstance(outcome, graph.Suspend) else outcome.output
     # The UI-visible thinking bundle rides the enclosing chat_turn/chat_approval
     # span, so the trace shows exactly what the user saw. Dev only (C3): the
@@ -475,9 +468,7 @@ def _absorb(
     if settings.environment == "dev":
         otel_trace.get_current_span().set_attribute("otto.thinking_steps", list(_steps(result)))
     if isinstance(outcome, graph.Suspend):
-        asyncio.run(
-            _pause(chat_id, result, question=question, node=outcome.node, graph_state=graph_state)
-        )
+        asyncio.run(_pause(chat_id, result, question=question, node=outcome.node))
     else:
         _clear_pending(chat_id)
     logfire.force_flush()  # make the trace visible in Tempo/Langfuse right away
@@ -650,8 +641,8 @@ def _ask(*, question: str) -> None:
             attributes={"question": question, "chat_id": chat_id},
         ),
     ):
-        outcome, graph_state = asyncio.run(_run_turn(chat_id, question))
-        _absorb(outcome, graph_state, chat_id=chat_id, question=question)
+        outcome = asyncio.run(_run_turn(chat_id, question))
+        _absorb(outcome, chat_id=chat_id, question=question)
     st.rerun()
 
 

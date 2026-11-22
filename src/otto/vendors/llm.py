@@ -97,10 +97,9 @@ def build_team_classifier(
 
 INTENT_ACCESS = "access_request"
 
-# The full intent taxonomy. The flow graph currently routes only
-# access_request to its own node; the service-owned intents (provisioning,
-# troubleshooting, …) route to team-profile flows once those exist — the
-# classifier already reads the services that resolution will key on.
+# The full intent taxonomy. The flow graph routes only access_request to
+# its own node; every other intent runs the general agent, and the label is
+# logged so the mix of requests can be measured.
 INTENTS = (
     INTENT_ACCESS,
     "provisioning",
@@ -116,16 +115,13 @@ INTENTS = (
 class IntentReading:
     """
     One classified inbound request: the intent label (None = unclassified —
-    callers fall back to the general flow), the service/tool names the
-    request mentions (the key owning-team resolution routes on), and the
-    retrieval gate's verdict — ``recall`` holds the keywords to search
-    long-term memory with when a past case would help, and is empty when the
-    gate is closed. Services and recall keywords are derived from untrusted
-    message text: never log them (NFR2).
+    callers fall back to the general flow), and the retrieval gate's verdict
+    — ``recall`` holds the keywords to search long-term memory with when a
+    past case would help, and is empty when the gate is closed. The keywords
+    are derived from untrusted message text: never log them (NFR2).
     """
 
     intent: str | None = None
-    services: tuple[str, ...] = ()
     recall: str = ""
 
 
@@ -150,13 +146,11 @@ class LLMIntentClassifier:
         prompt = (
             "Classify this tech-support request.\n"
             f"intent: exactly one of {', '.join(INTENTS)}.\n"
-            "services: the product/tool/system names the request mentions "
-            '(e.g. ["coder", "jenkins"]), lowercase, [] if none.\n'
             "recall: a few search keywords for our memory of previously resolved "
             "cases, if knowing how a similar issue was fixed before would help "
             'answer this; "" for access requests, greetings, and anything '
             "self-contained.\n"
-            'Reply with JSON only: {"intent": "...", "services": [...], "recall": "..."}\n\n'
+            'Reply with JSON only: {"intent": "...", "recall": "..."}\n\n'
             f"Request:\n{text}"
         )
         try:
@@ -172,15 +166,9 @@ class LLMIntentClassifier:
             logs.log_exception(exc, params={"classifier": "intent"})
             return IntentReading()
         intent = data.get("intent")
-        services = data.get("services")
         recall = data.get("recall")
         return IntentReading(
             intent=intent if intent in INTENTS else None,
-            services=(
-                tuple(str(service).lower() for service in services)
-                if isinstance(services, list)
-                else ()
-            ),
             recall=recall.strip() if isinstance(recall, str) else "",
         )
 

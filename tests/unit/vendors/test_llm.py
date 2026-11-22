@@ -59,24 +59,20 @@ def _intent_classifier(
 
 
 class TestLLMIntentClassifier:
-    async def test_returns_the_intent_and_lowercased_services(self):
-        # Given a model reply naming an intent and mixed-case service mentions
-        classifier = _intent_classifier(
-            reply='{"intent": "troubleshooting", "services": ["Coder", "Jenkins"]}'
-        )
+    async def test_returns_the_intent_the_model_names(self):
+        # Given a model reply naming a taxonomy intent
+        classifier = _intent_classifier(reply='{"intent": "troubleshooting", "recall": ""}')
 
         # When a request is classified
         reading = await classifier.classify(text="Coder workspace build fails on Jenkins")
 
-        # Then the reading carries the intent and normalized services
-        assert reading == llm.IntentReading(
-            intent="troubleshooting", services=("coder", "jenkins")
-        )
+        # Then the reading carries the intent, with the gate closed
+        assert reading == llm.IntentReading(intent="troubleshooting")
 
     async def test_reads_the_retrieval_gates_keywords(self):
         # Given a model reply that says past cases would help, with keywords
         classifier = _intent_classifier(
-            reply='{"intent": "troubleshooting", "services": [], "recall": " vpn hotel wifi "}'
+            reply='{"intent": "troubleshooting", "recall": " vpn hotel wifi "}'
         )
 
         # When a request is classified
@@ -87,9 +83,7 @@ class TestLLMIntentClassifier:
 
     async def test_keeps_the_gate_closed_when_the_reply_is_not_keywords(self):
         # Given a model reply whose recall field is not a string
-        classifier = _intent_classifier(
-            reply='{"intent": "how_to", "services": [], "recall": true}'
-        )
+        classifier = _intent_classifier(reply='{"intent": "how_to", "recall": true}')
 
         # When a request is classified
         reading = await classifier.classify(text="How do I reset my password?")
@@ -100,26 +94,26 @@ class TestLLMIntentClassifier:
     async def test_reads_the_json_out_of_model_chatter(self):
         # Given a local thinking model that decorates its answer with fences
         classifier = _intent_classifier(
-            reply='Sure!\n```json\n{"intent": "access_request", "services": []}\n```\nDone.'
+            reply='Sure!\n```json\n{"intent": "access_request", "recall": ""}\n```\nDone.'
         )
 
         # When a request is classified
         reading = await classifier.classify(text="I need snowflake reporting access")
 
         # Then the embedded JSON still parses
-        assert reading == llm.IntentReading(intent=llm.INTENT_ACCESS, services=())
+        assert reading == llm.IntentReading(intent=llm.INTENT_ACCESS)
 
-    async def test_drops_an_off_taxonomy_intent_but_keeps_the_services(self):
+    async def test_drops_an_off_taxonomy_intent_but_keeps_the_gates_verdict(self):
         # Given a model reply whose intent label is outside the taxonomy
         classifier = _intent_classifier(
-            reply='{"intent": "party_planning", "services": ["snowflake"]}'
+            reply='{"intent": "party_planning", "recall": "snowflake outage"}'
         )
 
         # When a request is classified
         reading = await classifier.classify(text="Plan me a party in snowflake")
 
-        # Then the intent is unclassified while the service mentions survive
-        assert reading == llm.IntentReading(intent=None, services=("snowflake",))
+        # Then the intent is unclassified while the recall keywords survive
+        assert reading == llm.IntentReading(intent=None, recall="snowflake outage")
 
     async def test_fails_open_to_an_empty_reading_on_a_model_error(self):
         # Given a gateway error during classification

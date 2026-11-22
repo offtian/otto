@@ -1,0 +1,42 @@
+# Otto's catalog: what the general agent may reach beyond its built-in tools.
+# Two flat lists, both optional — adding an entry here is the whole change,
+# no orchestration code.
+#
+# specialists — read-only sub-agents the agent can consult, several at once.
+#   Each mounts as a `consult_<name>` tool, and what its own tools return
+#   stays in its context: the main agent reads only the findings.
+#   `tools` is an explicit allowlist of the named MCP server's tools, and
+#   everything allowlisted runs WITHOUT a human approval gate — so list reads
+#   only (an approval pause inside a nested specialist run can never be
+#   approved). The MCP server itself is named in settings:
+#   SPECIALIST_MCP_URLS="coder:http://...,jenkins:http://...".
+#   A specialist with no `mcp`/`tools` runs on its instructions alone.
+#
+# repos — repositories the agent may read and propose changes to, as pull
+#   requests that always wait for a human approval showing the exact edits.
+#   `paths` are glob patterns of the only files a change may touch (checked
+#   in code; leave CI config such as `.github/*` out), and `base` is the
+#   branch changes are proposed against (default: main). Repositories are
+#   reached with GITHUB_TOKEN, or read from LOCAL_REPOS_DIR without one.
+#
+# specialists:
+#   - name: coder
+#     description: Reads Coder workspaces, templates, and build logs.
+#     mcp: coder
+#     tools: [get_workspace, get_template, get_build_logs]
+#     instructions: |
+#       You are the Coder specialist. Inspect workspaces, templates, and
+#       build logs to explain failures.
+#
+#   - name: jenkins
+#     description: Reads Jenkins jobs, builds, and console output.
+#     mcp: jenkins
+#     tools: [get_job, get_build, get_console_log]
+#     instructions: |
+#       You are the Jenkins specialist. Inspect jobs, builds, and console
+#       output to explain failures.
+#
+# repos:
+#   - name: acme/infra-live
+#     description: Terraform for Coder workspace quotas and templates.
+#     paths: ["coder/*"]
