@@ -7,11 +7,14 @@ intake ack (NFR1). FR8: a crashed handler never drops silently — it logs, and
 the request path additionally posts a user-visible apology at the origin. A
 process that dies mid-run must not drop a request either, so requests pass
 through the durable inbox: ``accept`` before the intake ack, and
-``unfinished_requests`` at startup for whatever never finished. The interface
-parses/validates payloads into these inputs and schedules these functions; it
-holds no orchestration itself.
+``unfinished_requests`` at startup for whatever never finished. And a
+conversation runs one request at a time, so two messages on one thread never
+race each other. The interface parses/validates payloads into these inputs
+and schedules these functions; it holds no orchestration itself.
 """
 
+import asyncio
+import weakref
 from datetime import datetime, timedelta
 
 import attrs
@@ -26,6 +29,10 @@ from otto.utils import logs
 # replayed: long enough to cover an overnight outage, short enough that a
 # forgotten row never resurfaces in a conversation that moved on days ago.
 _REPLAY_WINDOW = timedelta(hours=24)
+
+# One lock per conversation with a run in flight or waiting. Weak values: a
+# lock exists exactly as long as some run holds or awaits it.
+_conversation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
 # What the agent reads when a follow-up wakes it. The note is its own earlier
 # words about an untrusted conversation, so it is quoted as data.
@@ -92,15 +99,27 @@ async def handle_safely(request: entities.SupportRequest) -> None:
     apology (FR8) — never a silent drop. Either way the request then leaves
     the durable inbox; a run cut short by the process dying does not, and
     the next start replays it (``unfinished_requests``).
+
+    Requests on one conversation run one at a time, in arrival order: a
+    second message waits for the first run, then starts with that run's
+    answer already in the thread — instead of both rebuilding the thread
+    blind and racing to the same gated tool. Each still gets its own run
+    (waku-agent folds the waiting ones into a single run; Otto does not, so
+    no message can go unanswered).
+
+    ponytail: the lock is in-process — a second replica can still run the
+    same conversation concurrently. Take it in Postgres (an advisory lock on
+    the origin) before running replicas (Phase 3).
     """
-    try:
-        await support.handle_support_request(request=request)
-    except Exception as exc:
-        logs.log_exception(exc, params={"request_id": request.id})
+    async with _conversation_lock(request.origin):
         try:
-            await support.notify_failure(request=request)
-        except Exception as notify_exc:
-            logs.log_exception(notify_exc, params={"request_id": request.id})
+            await support.handle_support_request(request=request)
+        except Exception as exc:
+            logs.log_exception(exc, params={"request_id": request.id})
+            try:
+                await support.notify_failure(request=request)
+            except Exception as notify_exc:
+                logs.log_exception(notify_exc, params={"request_id": request.id})
     # Deliberately not a ``finally``: a cancelled run (shutdown mid-flight)
     # must stay in the inbox so the next start replays it.
     await _finish(request_id=request.id)
@@ -169,6 +188,15 @@ async def fire_due_follow_ups(*, now: datetime) -> None:
         logs.log_event("follow_up_fired", params={"follow_up_id": follow_up.id})
         if accepted:
             await handle_safely(request)
+
+
+def _conversation_lock(origin: entities.Origin) -> asyncio.Lock:
+    key = entities.origin_to_json(origin)
+    lock = _conversation_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _conversation_locks[key] = lock
+    return lock
 
 
 async def _finish(*, request_id: str) -> None:

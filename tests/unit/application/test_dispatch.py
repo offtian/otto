@@ -3,6 +3,7 @@ import types
 from datetime import UTC, datetime, timedelta
 from unittest import mock
 
+import attrs
 import pytest
 
 from otto import config
@@ -128,6 +129,38 @@ class TestHandleSafely:
         # Then it was handled once and no longer waits for a replay
         handler.assert_awaited_once_with(request=request)
         assert inbox.in_flight == {}
+
+
+class TestOneRunPerConversation:
+    async def test_a_second_message_waits_for_the_first_run_on_its_conversation(self, monkeypatch):
+        # Given a handler that records each run it starts and holds it open
+        started: list[str] = []
+        release = asyncio.Event()
+
+        async def handler(*, request):
+            started.append(request.id)
+            await release.wait()
+
+        _wire(monkeypatch, inbox=None, handler=handler)
+        other_thread = entities.SlackThread(channel_id="C1", thread_ts="2.0")
+        same_thread = [_request("Ev-first"), _request("Ev-second")]
+        elsewhere = attrs.evolve(_request("Ev-elsewhere"), origin=other_thread)
+
+        # When two messages arrive on one thread and a third on another
+        runs = [
+            asyncio.create_task(dispatch.handle_safely(request))
+            for request in (*same_thread, elsewhere)
+        ]
+        for _ in range(3):
+            await asyncio.sleep(0)
+        started_while_first_runs = list(started)
+        release.set()
+        await asyncio.gather(*runs)
+
+        # Then the second message did not start until the first run was done,
+        # while the other conversation was never held up
+        assert started_while_first_runs == ["Ev-first", "Ev-elsewhere"]
+        assert started == ["Ev-first", "Ev-elsewhere", "Ev-second"]
 
 
 class TestUnfinishedRequests:
