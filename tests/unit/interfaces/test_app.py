@@ -659,20 +659,36 @@ class TestStartupRecovery:
 
 class TestAlwaysOnTick:
     @pytest.mark.parametrize("otto_enabled", [True, False])
-    async def test_retries_undelivered_replies_only_while_otto_is_enabled(
-        self, monkeypatch, otto_enabled
-    ):
-        # Given a retry spy and a kill switch in the given position
+    async def test_speaks_only_while_otto_is_enabled(self, monkeypatch, otto_enabled):
+        # Given duty spies and a kill switch in the given position
         retry = mock.AsyncMock()
         monkeypatch.setattr(delivery, "retry_due", retry)
+        fire = mock.AsyncMock()
+        monkeypatch.setattr(dispatch, "fire_due_follow_ups", fire)
         kill_switch = mock.AsyncMock()
         kill_switch.enabled.return_value = otto_enabled
 
         # When the always-on tick runs
         await otto_app._always_on_tick(kill_switch)
 
-        # Then queued replies go out only if Otto may speak
-        assert retry.await_count == int(otto_enabled)
+        # Then queued replies and due follow-ups go out only if Otto may speak
+        assert (retry.await_count, fire.await_count) == (int(otto_enabled),) * 2
+
+    async def test_a_failing_duty_does_not_starve_the_other(self, monkeypatch):
+        # Given reply retries that blow up, and an enabled kill switch
+        monkeypatch.setattr(
+            delivery, "retry_due", mock.AsyncMock(side_effect=RuntimeError("outbox down"))
+        )
+        fire = mock.AsyncMock()
+        monkeypatch.setattr(dispatch, "fire_due_follow_ups", fire)
+        kill_switch = mock.AsyncMock()
+        kill_switch.enabled.return_value = True
+
+        # When the always-on tick runs
+        await otto_app._always_on_tick(kill_switch)
+
+        # Then due follow-ups still fire
+        assert fire.await_count == 1
 
 
 class TestHealthz:

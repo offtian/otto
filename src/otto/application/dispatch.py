@@ -27,6 +27,15 @@ from otto.utils import logs
 # forgotten row never resurfaces in a conversation that moved on days ago.
 _REPLAY_WINDOW = timedelta(hours=24)
 
+# What the agent reads when a follow-up wakes it. The note is its own earlier
+# words about an untrusted conversation, so it is quoted as data.
+_FOLLOW_UP_PROMPT = (
+    "[Scheduled follow-up — nobody wrote this message; you set it yourself "
+    "earlier in this conversation.] Your note said: {note!r}. Do what the note "
+    "calls for now and report the result here. If it is still not finished, say "
+    "so, and schedule another follow-up only if it is worth waiting longer."
+)
+
 
 @attrs.frozen
 class ApprovalDecision:
@@ -127,6 +136,39 @@ async def unfinished_requests(*, now: datetime) -> list[entities.SupportRequest]
     requests = await inbox.list_unfinished()
     logs.log_event("request_recovery", params={"replayed": len(requests), "discarded": discarded})
     return requests
+
+
+async def fire_due_follow_ups(*, now: datetime) -> None:
+    """
+    Wake the conversations whose follow-up has come due: each becomes an
+    inbound request on its conversation, on behalf of the original requester,
+    with the agent's own note as the reason it woke.
+
+    The request enters the durable inbox before the follow-up is marked
+    fired, so a crash between the two re-fires it rather than losing it —
+    and the outbox's one-reply-per-request key keeps that second run silent.
+
+    ponytail: handled one after another on the always-on loop, so a slow run
+    delays the next follow-up and the reply retries behind it. Hand them to
+    background tasks if follow-ups ever queue up.
+
+    :param now: reference time, read at the interface layer.
+    """
+    store = config.get_config().follow_ups
+    if store is None:
+        return
+    for follow_up in await store.due(now=now):
+        request = entities.SupportRequest(
+            id=f"followup:{follow_up.id}",
+            user_id=follow_up.requester_id,
+            text=_FOLLOW_UP_PROMPT.format(note=follow_up.note),
+            origin=follow_up.origin,
+        )
+        accepted = await accept(request=request)
+        await store.mark_fired(follow_up.id)
+        logs.log_event("follow_up_fired", params={"follow_up_id": follow_up.id})
+        if accepted:
+            await handle_safely(request)
 
 
 async def _finish(*, request_id: str) -> None:

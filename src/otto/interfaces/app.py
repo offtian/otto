@@ -83,13 +83,22 @@ async def _sweep_loop(interval_seconds: int) -> None:
 async def _always_on_tick(kill_switch: killswitch.KillSwitch) -> None:
     """
     Run the always-on duties once: retry the replies that could not be
-    delivered. They make Otto speak, so they honor the kill switch — while
-    Otto is silenced, due work simply waits.
+    delivered, and wake the conversations whose follow-up is due. Both make
+    Otto speak, so they honor the kill switch — while Otto is silenced, due
+    work simply waits. Each duty fails on its own: a broken one is logged and
+    must not starve the other.
     """
     now = datetime.now(tz=UTC)
     if not await kill_switch.enabled(now=now):
         return
-    await delivery.retry_due(now=now)
+    for job, duty in (
+        ("reply_retry", delivery.retry_due),
+        ("follow_ups", dispatch.fire_due_follow_ups),
+    ):
+        try:
+            await duty(now=now)
+        except Exception as exc:
+            logs.log_exception(exc, params={"job": job})
 
 
 async def _always_on_loop(kill_switch: killswitch.KillSwitch) -> None:

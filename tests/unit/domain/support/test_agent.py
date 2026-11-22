@@ -1,10 +1,12 @@
 import json
 import pathlib
+from datetime import timedelta
 
 import agents
 from agents import tool_context
 
 from otto.domain.support import agent as support_agent
+from otto.domain.support import entities, followups
 
 
 class FakeTicketBackend:
@@ -40,7 +42,25 @@ class FakeMemoryStore:
         return list(self.passages)
 
 
-def _context(runbooks_dir: pathlib.Path, backend=None, memory=None):
+class FakeFollowUpStore:
+    def __init__(self, error=None, pending=0):
+        self.error = error
+        self.pending = pending
+        self.scheduled = []
+
+    async def schedule(self, *, origin, requester_id, note, delay):
+        if self.error is not None:
+            raise self.error
+        self.scheduled.append((origin, requester_id, note, delay))
+
+    async def cancel_pending(self, *, origin):
+        return self.pending
+
+
+THREAD = entities.SlackThread(channel_id="C1", thread_ts="1.0")
+
+
+def _context(runbooks_dir: pathlib.Path, backend=None, memory=None, follow_ups=None):
     return tool_context.ToolContext(
         context=support_agent.SupportContext(
             requester_id="U_REQ",
@@ -48,6 +68,8 @@ def _context(runbooks_dir: pathlib.Path, backend=None, memory=None):
             runbooks_dir=runbooks_dir,
             ticket_backend=backend or FakeTicketBackend(),
             memory=memory,
+            origin=THREAD if follow_ups is not None else None,
+            follow_ups=follow_ups,
         ),
         tool_name="test",
         tool_call_id="call-1",
@@ -166,6 +188,77 @@ class TestSearchMemory:
         assert "proceed without it" in answer
 
 
+class TestScheduleFollowUp:
+    ARGUMENTS = json.dumps({"delay_minutes": 30, "note": "check Jenkins build 4521"})
+
+    async def test_schedules_on_the_conversation_for_its_requester(self, tmp_path):
+        # Given a conversation with a follow-up store
+        store = FakeFollowUpStore()
+
+        # When the agent schedules a follow-up in half an hour
+        reply = await support_agent.schedule_follow_up.on_invoke_tool(
+            _context(tmp_path, follow_ups=store), self.ARGUMENTS
+        )
+
+        # Then it is booked on this thread, for this requester, with the note
+        assert store.scheduled == [
+            (THREAD, "U_REQ", "check Jenkins build 4521", timedelta(minutes=30))
+        ]
+        assert "30 minutes" in reply
+
+    async def test_says_so_when_follow_ups_are_unavailable(self, tmp_path):
+        # Given an environment without a follow-up store
+        # When the agent tries to schedule one
+        reply = await support_agent.schedule_follow_up.on_invoke_tool(
+            _context(tmp_path), self.ARGUMENTS
+        )
+
+        # Then it is told plainly, so it does not promise to check back
+        assert "not available" in reply
+
+    async def test_refuses_a_delay_beyond_thirty_days(self, tmp_path):
+        # Given a conversation with a follow-up store
+        store = FakeFollowUpStore()
+
+        # When the agent asks to wait two months
+        reply = await support_agent.schedule_follow_up.on_invoke_tool(
+            _context(tmp_path, follow_ups=store),
+            json.dumps({"delay_minutes": 60 * 24 * 60, "note": "check again"}),
+        )
+
+        # Then nothing is booked and the allowed range is named
+        assert store.scheduled == []
+        assert "between 1 and 43200" in reply
+
+    async def test_tells_the_agent_to_escalate_once_the_conversation_is_at_its_limit(
+        self, tmp_path
+    ):
+        # Given a conversation that already holds its allowed follow-ups
+        store = FakeFollowUpStore(error=followups.FollowUpLimitReached("limit"))
+
+        # When the agent schedules one more
+        reply = await support_agent.schedule_follow_up.on_invoke_tool(
+            _context(tmp_path, follow_ups=store), self.ARGUMENTS
+        )
+
+        # Then it is steered to a human instead of waking itself again
+        assert "escalate" in reply
+
+
+class TestCancelFollowUps:
+    async def test_cancels_what_is_still_scheduled_on_the_conversation(self, tmp_path):
+        # Given a conversation with two follow-ups still waiting
+        store = FakeFollowUpStore(pending=2)
+
+        # When the agent cancels them
+        reply = await support_agent.cancel_follow_ups.on_invoke_tool(
+            _context(tmp_path, follow_ups=store), "{}"
+        )
+
+        # Then it reports how many were cancelled
+        assert reply == "Cancelled 2 scheduled follow-up(s)."
+
+
 class TestBuildAgent:
     def test_mounts_stub_tools_when_no_mcp_is_configured(self):
         # Given no MCP servers
@@ -179,6 +272,8 @@ class TestBuildAgent:
             "read_runbook",
             "escalate_to_human",
             "search_memory",
+            "schedule_follow_up",
+            "cancel_follow_ups",
             "search_knowledge",
             "submit_access_request",
         }
@@ -203,6 +298,8 @@ class TestBuildAgent:
             "read_runbook",
             "escalate_to_human",
             "search_memory",
+            "schedule_follow_up",
+            "cancel_follow_ups",
             "confluence_search",
             "submit_access_request",
         }

@@ -361,6 +361,8 @@ async def sweep_approvals(*, now: datetime) -> None:
     purged_replies = (
         await cfg.outbox.purge(cutoff=retention_cutoff) if cfg.outbox is not None else 0
     )
+    if cfg.follow_ups is not None:
+        await cfg.follow_ups.purge(cutoff=retention_cutoff)
     logs.log_event(
         "approval_sweep",
         params={
@@ -432,6 +434,8 @@ def _build_context(
         runbooks_dir=pathlib.Path(cfg.settings.runbooks_dir),
         ticket_backend=cfg.triage,
         memory=cfg.memory,
+        origin=origin,
+        follow_ups=cfg.follow_ups,
     )
 
 
