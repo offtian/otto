@@ -17,6 +17,7 @@ import pathlib
 import typing
 
 import agents
+import databases
 import httpx
 import pydantic
 from agents.models import interface as model_interface
@@ -141,7 +142,7 @@ class Configuration(pydantic.BaseModel):
         """
         if not self.settings.memory_enabled or not self.settings.database_url:
             return
-        self.memory = support_memory.PostgresMemoryStore(database=db.get_db())
+        self.memory = build_memory_store(self.settings, database=db.get_db())
         self.case_distiller = support_consolidation.AgentCaseDistiller(model=self.model)
         if self.settings.memory_history_enabled:
             self.case_history = support_history.PostgresCaseHistory(database=db.get_db())
@@ -328,6 +329,31 @@ class Configuration(pydantic.BaseModel):
         servers are connected.
         """
         self.catalog = support_catalog.load_catalog(pathlib.Path(self.settings.otto_file))
+
+
+def build_memory_store(
+    settings_: Settings, *, database: databases.Database
+) -> support_memory.MemoryStore:
+    """
+    Return the memory store the settings call for: keyword search over
+    ``database``, plus search by meaning when an embedding model is named.
+    Its own function because the dev chat rebuilds loop-bound clients per
+    interaction and needs the same choice.
+    """
+    embedder = (
+        llm.build_embedder(
+            base_url=settings_.llm_base_url,
+            api_key=settings_.llm_api_key,
+            model_name=settings_.memory_embedding_model,
+        )
+        if settings_.memory_embedding_model
+        else None
+    )
+    return support_memory.PostgresMemoryStore(
+        database=database,
+        embedder=embedder,
+        max_distance=settings_.memory_embedding_max_distance,
+    )
 
 
 def build_repo_host(settings_: Settings) -> support_changes.RepoHost | None:

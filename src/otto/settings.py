@@ -113,9 +113,9 @@ class Settings(BaseSettings):
 
     # Long-term memory: on a confirmed resolution the conversation is
     # distilled into a de-identified case note (one model call on llm_model),
-    # kept in this database and found again by keyword — no embeddings, and
-    # no model call to search. Off by default: it stores what it learns, so
-    # turning it on is a decision. Needs DATABASE_URL.
+    # kept in this database and found again by keyword, with no model call
+    # to search. Off by default: it stores what it learns, so turning it on
+    # is a decision. Needs DATABASE_URL.
     memory_enabled: bool = False
     # A note that no resolved case has matched for this many days is
     # forgotten by the maintenance sweep.
@@ -126,6 +126,15 @@ class Settings(BaseSettings):
     # default, needs memory_enabled, and kept only this many days.
     memory_history_enabled: bool = False
     memory_history_days: int = 30
+    # Search by meaning as well as by keyword: name an embedding model the
+    # gateway serves (/v1/embeddings) and a note is also found when the
+    # request words the problem differently. Empty = keyword only. Needs the
+    # pgvector extension in the database (the compose image has it).
+    memory_embedding_model: str = ""
+    # How far a note may be from a request (cosine distance: 0 the same
+    # meaning, 1 unrelated) and still be recalled on meaning alone. It
+    # depends on the embedding model — calibrate it on real notes.
+    memory_embedding_max_distance: float = 0.5
 
     # The catalog: a YAML file of two flat lists — the specialists the
     # general agent may consult and the repositories it may propose changes
