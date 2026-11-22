@@ -21,7 +21,7 @@ from openai.types.responses import (
 )
 
 from otto import config
-from otto.application import support
+from otto.application import dispatch, support
 from otto.domain.identity import users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals, catalog, changes, entities
@@ -140,6 +140,9 @@ class FakeSlackGateway:
 class FakeRepoHost:
     def __init__(self):
         self.pull_requests = []
+        # The one existing pull request, as its fields; None = there is none.
+        self.pull_request = None
+        self.commits = []
 
     async def read_file(self, *, repo, path, ref):
         return QUOTAS if path == "coder/quotas.tfvars" else None
@@ -150,6 +153,12 @@ class FakeRepoHost:
     async def open_pull_request(self, *, repo, base, branch, title, body, files):
         self.pull_requests.append({"repo": repo, "base": base, "files": dict(files)})
         return PULL_REQUEST_URL
+
+    async def get_pull_request(self, *, repo, number):
+        return self.pull_request
+
+    async def push_commit(self, *, repo, branch, parent, message, files):
+        self.commits.append({"branch": branch, "parent": parent, "files": dict(files)})
 
 
 class FakeReviewer:
@@ -177,12 +186,15 @@ def wire(monkeypatch):
     repository, and a fake repository host; return (gateway, host).
     """
 
-    def _wire(model, reviewer=None):
+    def _wire(model, reviewer=None, signing_key=""):
         gateway = FakeSlackGateway()
         host = FakeRepoHost()
         cfg = config.Configuration(
             settings=Settings(
-                _env_file=None, slack_triage_channel="C_TRIAGE", support_user_ids="U_SUPPORT"
+                _env_file=None,
+                slack_triage_channel="C_TRIAGE",
+                support_user_ids="U_SUPPORT",
+                github_webhook_secret=signing_key,
             ),
             slack=gateway,
             triage=slack_vendor.SlackTriageBackend(gateway=gateway, triage_channel="C_TRIAGE"),
@@ -198,6 +210,7 @@ def wire(monkeypatch):
                 model=model,
                 specialist_mcp_tools={},
                 repo_host=host,
+                signing_key=signing_key,
             ),
             catalog=CATALOG,
             repo_host=host,
@@ -328,6 +341,138 @@ class TestRepositoryChange:
         assert "outside the paths that may be changed" in json.dumps(model.inputs[-1], default=str)
 
 
+SIGNING_KEY = "test-webhook-secret"
+BRANCH = "otto/raise-the-ai-team-s-cpu-quota-1a2b3c4d"
+REVISION = {
+    "repo": "acme/infra-live",
+    "number": 7,
+    "message": "Raise it to 32, as the reviewer asked",
+    "edits": [RAISE_AI_CPU],
+}
+
+
+def _pull_request_fields(*, body: str | None = None) -> dict:
+    """
+    Pull request 7 as the host reports it: open and, unless told otherwise,
+    carrying the return address of the conversation that asked for it.
+    """
+    address = changes.return_address(origin=ORIGIN, requester_id="U_REQ", key=SIGNING_KEY)
+    return {
+        "number": 7,
+        "url": PULL_REQUEST_URL,
+        "title": PROPOSAL["title"],
+        "body": address if body is None else body,
+        "branch": BRANCH,
+        "head": "head-sha",
+        "base": "main",
+        "open": True,
+        "same_repo": True,
+    }
+
+
+def _revising_model(*, after_decision="Done."):
+    """
+    A model that reads the file on the pull request, previews its revision,
+    asks to push it, and — once the human has decided — says one last thing.
+    """
+    where = {"repo": "acme/infra-live", "number": 7}
+    return ScriptedModel(
+        [
+            [_tool_call("read_pull_request_file", where | {"path": RAISE_AI_CPU["path"]})],
+            [_tool_call("preview_update", where | {"edits": REVISION["edits"]})],
+            [_tool_call("update_pull_request", REVISION)],
+            [_text(after_decision)],
+        ]
+    )
+
+
+async def _report_requested_changes():
+    """
+    Deliver what the GitHub webhook delivers when a reviewer asks for changes
+    on the pull request this conversation asked for.
+    """
+    event = changes.PullRequestEvent(
+        kind=changes.CHANGES_REQUESTED,
+        url=PULL_REQUEST_URL,
+        title=PROPOSAL["title"],
+        origin=ORIGIN,
+        requester_id="U_REQ",
+        detail="Go to 32, not 24.",
+        repo="acme/infra-live",
+        number=7,
+    )
+    await support.handle_support_request(
+        request=dispatch.pull_request_update(event=event, delivery_id="d-review")
+    )
+
+
+class TestRevision:
+    async def test_a_reviewers_request_becomes_a_revision_that_waits_for_approval(self, wire):
+        # Given this conversation's open pull request, and a model that
+        # answers a review by revising it
+        model = _revising_model()
+        gateway, host = wire(model, signing_key=SIGNING_KEY)
+        host.pull_request = _pull_request_fields()
+
+        # When the reviewer's request for changes is reported
+        await _report_requested_changes()
+
+        # Then the model was told which pull request to revise, read it and
+        # previewed a real diff — and nothing is written: the approver's card
+        # names the pull request and shows the exact edit
+        (card,) = gateway.cards
+        assert "number 7 in acme/infra-live" in json.dumps(model.inputs[0], default=str)
+        assert "+  ai            = { cpu = 32" in json.dumps(model.inputs[-1], default=str)
+        assert card["tool_name"] == "update_pull_request"
+        assert "*Revises pull request:* #7" in card["summary"]
+        assert "+ ai            = { cpu = 32," in card["summary"]
+        assert host.commits == []
+
+    async def test_approval_commits_the_revision_to_the_same_pull_request(self, wire):
+        # Given a paused revision of this conversation's pull request
+        gateway, host = wire(
+            _revising_model(after_decision="I've updated the pull request."),
+            signing_key=SIGNING_KEY,
+        )
+        host.pull_request = _pull_request_fields()
+        await _report_requested_changes()
+
+        # When an authorized approver approves it
+        await support.resolve_approval(
+            approval_id=gateway.cards[0]["approval_id"], resolver_id="U_SUPPORT", approved=True
+        )
+
+        # Then one commit with the whole edited file goes on the pull
+        # request's own branch, on the commit it was staged against — no
+        # second pull request — and the requester hears about it
+        (commit,) = host.commits
+        assert (commit["branch"], commit["parent"]) == (BRANCH, "head-sha")
+        assert "ai            = { cpu = 32, memory = 64" in commit["files"][RAISE_AI_CPU["path"]]
+        assert host.pull_requests == []
+        assert any("updated the pull request" in text for _, _, text in gateway.messages)
+
+    async def test_a_revision_of_somebody_elses_pull_request_is_flagged_and_never_written(
+        self, wire
+    ):
+        # Given a pull request with the same number that a person opened, and
+        # a model that asks to revise it all the same
+        gateway, host = wire(_revising_model(), signing_key=SIGNING_KEY)
+        host.pull_request = _pull_request_fields(body="Opened by hand, no return address.")
+        await _report_requested_changes()
+
+        # When the approver approves it anyway
+        await support.resolve_approval(
+            approval_id=gateway.cards[0]["approval_id"], resolver_id="U_SUPPORT", approved=True
+        )
+
+        # Then the card's thread had already said it would change nothing,
+        # and nothing was committed anywhere
+        (note,) = _notes_under_the_card(gateway)
+        assert "will not apply as proposed" in note
+        assert "was not opened from this conversation" in note
+        assert host.commits == []
+
+
 def _notes_under_the_card(gateway) -> list[str]:
     return [
         text
@@ -400,7 +545,7 @@ class TestSecondOpinion:
         # When the request pauses for approval
         await _ask_for_more_cpu()
 
-        # Then the card's thread says approving it opens nothing, and why
+        # Then the card's thread says approving it changes nothing, and why
         (note,) = _notes_under_the_card(gateway)
         assert "will not apply as proposed" in note
         assert "outside the paths that may be changed" in note

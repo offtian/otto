@@ -116,8 +116,10 @@ router → dispatch.accept → dispatch.handle_safely → flows.SUPPORT → deli
   gated unless `policy.UNGATED_TOOLS` clears it with a sign-off reference.
 - **A repository change** goes through `domain/support/changes`: exact-match
   edits, the path allowlist, `stage_proposal`. Nothing writes to a repository
-  except the gated `open_pull_request`, and what the approval card shows is
-  what gets applied.
+  except the gated `open_pull_request` and `update_pull_request`, and what the
+  approval card shows is what gets applied. A pull request is revised only if
+  it carries this conversation's signed return address (`find_revisable`) —
+  never a branch Otto did not create.
 - **A new model role** (classifier, distiller, reviewer) is a setting naming a
   model on the same gateway — no vendor-specific SDK.
 

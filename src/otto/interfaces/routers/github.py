@@ -1,12 +1,12 @@
 """
 GitHub router: webhook intake for the pull requests Otto opens.
 
-Verifies the webhook signature, maps a merge, a closure or a request for
-changes to a request on the conversation that asked for the pull request, and
-dispatches it to a background task like any other inbound request. Every
-other event, and every pull request that does not carry Otto's signed return
-address, is acked and ignored. Payload validation and domain mapping live in
-``interfaces.schemas`` — no business logic here.
+Verifies the webhook signature, maps a merge, a closure, a request for
+changes or a failed check to a request on the conversation that asked for the
+pull request, and dispatches it to a background task like any other inbound
+request. Every other event, and every pull request that does not carry
+Otto's signed return address, is acked and ignored. Payload validation and
+domain mapping live in ``interfaces.schemas`` — no business logic here.
 """
 
 import json
@@ -38,12 +38,24 @@ async def github_webhook(
     delivery_id = request.headers.get("x-github-delivery", "")
     if webhook is None or not delivery_id:
         return fastapi.Response()
-    event = webhook.to_pull_request_event(
-        event=request.headers.get("x-github-event", ""), signing_key=secret
-    )
-    if event is None or not await request.app.state.kill_switch.enabled(now=datetime.now(tz=UTC)):
+    kind = request.headers.get("x-github-event", "")
+    event = webhook.to_pull_request_event(event=kind, signing_key=secret)
+    failure = webhook.to_check_failure(event=kind) if event is None else None
+    if event is None and failure is None:
+        return fastapi.Response()
+    if not await request.app.state.kill_switch.enabled(now=datetime.now(tz=UTC)):
         return fastapi.Response()
     if request.app.state.recent_events.seen(f"github:{delivery_id}"):
+        return fastapi.Response()
+    if failure is not None:
+        # The payload names the pull request but not whose it is: that takes
+        # a read of the pull request itself.
+        event = await dispatch.check_failure_event(failure=failure, signing_key=secret)
+        # One report per commit, however many of its checks fail.
+        commit = f"github:checks:{failure.repo}#{failure.number}:{failure.commit}"
+        if event is None or request.app.state.recent_events.seen(commit):
+            return fastapi.Response()
+    if event is None:
         return fastapi.Response()
     support_request = dispatch.pull_request_update(event=event, delivery_id=delivery_id)
     # Durable before the ack, like every other intake: GitHub does not
