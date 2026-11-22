@@ -136,6 +136,17 @@ class Settings(BaseSettings):
     # "name:token" pairs for the servers above that need auth.
     specialist_mcp_tokens: str = ""
 
+    # Repositories (GitHub): the write path for provisioning and engineering
+    # changes. With a token, the repositories teams own (profiles YAML) are
+    # read and proposed against through the GitHub API — give it a GitHub
+    # App installation token or a fine-grained PAT limited to those
+    # repositories, Contents + Pull requests read/write. Without one, the
+    # same flow runs against local_repos_dir when that directory exists: the
+    # dev stand-in, where reads are real and pull requests are placeholders.
+    github_token: str = ""
+    github_api_url: str = "https://api.github.com"
+    local_repos_dir: str = "fixtures/repos"
+
     # Directory of markdown runbooks the agent can walk users through.
     # Relative paths resolve against the process cwd (repo root for
     # `just run` and the compose app container alike).

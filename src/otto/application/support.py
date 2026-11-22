@@ -15,7 +15,7 @@ from otto import config
 from otto.application import delivery, flows, graph
 from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
-from otto.domain.support import approvals, audit, entities
+from otto.domain.support import approvals, audit, changes, entities
 from otto.utils import logs
 
 
@@ -755,9 +755,13 @@ def _approval_summary(*, tool_arguments: str) -> str:
 
 def _arguments_block(tool_arguments: str) -> str:
     """
-    Render one tool's argument string: labeled access-request fields when the
-    args are the access shape, the raw arguments fenced otherwise.
+    Render one tool's argument string: a pull request proposal as its
+    edits, labeled access-request fields when the args are the access shape,
+    the raw arguments fenced otherwise.
     """
+    proposal = changes.proposal_arguments(tool_arguments)
+    if proposal is not None:
+        return changes.render_proposal(proposal)
     try:
         args = json.loads(tool_arguments)
     except (json.JSONDecodeError, TypeError):
