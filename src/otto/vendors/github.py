@@ -2,13 +2,16 @@
 GitHub REST wrapper — no business logic. ``GitHubRepoHost`` structurally
 implements the domain ``RepoHost`` port (``domain/support/changes``): two
 reads off a branch, and one write that never touches an existing branch — a
-new branch, one commit, one pull request.
+new branch, one commit, one pull request. Webhook-signature verification
+lives here too, so the interface layer stays translation-only.
 
 The token should be a GitHub App installation token or a fine-grained PAT
 scoped to the catalogued repositories with Contents and Pull requests
 read/write — nothing else is called here.
 """
 
+import hashlib
+import hmac
 import urllib.parse
 from collections.abc import Mapping
 from typing import Any
@@ -18,6 +21,18 @@ import httpx
 
 
 _API_VERSION = "2022-11-28"
+
+
+def verify_webhook(*, secret: str, body: bytes, signature: str) -> bool:
+    """
+    Test whether an inbound GitHub webhook was signed with the shared secret
+    (the ``X-Hub-Signature-256`` header: ``sha256=`` + HMAC-SHA256 of the raw
+    body). Fails closed when no secret is configured.
+    """
+    if not secret:
+        return False
+    expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected)
 
 
 @attrs.frozen

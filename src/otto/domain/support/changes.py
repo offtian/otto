@@ -16,6 +16,10 @@ nobody saw. Only the paths a repository's profile allows can be touched.
 All three rules are checked in code, when a change is previewed and again
 when it is applied — never left to the model.
 
+A pull request Otto opens carries a signed return address — the
+conversation that asked for it — so that what later happens to it (merged,
+closed, changes requested) can be reported back there (``PullRequestEvent``).
+
 Two ports. ``RepoHost`` is wherever repositories live: GitHub
 (``vendors/github``), or a local directory (``LocalRepoHost``) in dev.
 ``ChangeReviewer`` is an independent second opinion on a staged change,
@@ -25,6 +29,8 @@ blocks or alters anything (an agent on any model, ``reviewer``).
 
 import difflib
 import fnmatch
+import hashlib
+import hmac
 import json
 import pathlib
 import posixpath
@@ -140,6 +146,28 @@ class RepoHost(Protocol):
         opens to review it.
         """
         ...
+
+
+MERGED = "merged"
+CLOSED = "closed"
+CHANGES_REQUESTED = "changes_requested"
+
+
+@attrs.frozen
+class PullRequestEvent:
+    """
+    Something that happened to a pull request Otto opened, addressed to the
+    conversation that asked for it.
+    """
+
+    # MERGED, CLOSED (without merging) or CHANGES_REQUESTED.
+    kind: str
+    url: str
+    title: str
+    origin: entities.Origin
+    requester_id: str
+    # A reviewer's own words, for CHANGES_REQUESTED. Untrusted.
+    detail: str = ""
 
 
 @attrs.frozen
@@ -355,20 +383,70 @@ def _plain(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def pull_request_body(*, summary: str, context: support_agent.SupportContext) -> str:
+def pull_request_body(
+    *, summary: str, context: support_agent.SupportContext, signing_key: str = ""
+) -> str:
     """
     Return the pull request description: the agent's summary, who asked and
-    where, and — hidden — the originating conversation, so a later event on
-    the pull request can be reported back to it.
+    where, and — hidden, when there is a key to sign it with — the return
+    address a later event on the pull request is reported back to.
     """
     body = (
         f"{summary}\n\n---\n"
         f"Opened by Otto for `{context.requester_id}` ({context.origin_ref}) after a "
         "human approved the automation. Review the change itself as you would any other."
     )
-    if context.origin is not None:
-        body += f"\n<!-- otto-origin: {entities.origin_to_json(context.origin)} -->"
+    if context.origin is not None and signing_key:
+        address = return_address(
+            origin=context.origin, requester_id=context.requester_id, key=signing_key
+        )
+        body += f"\n{address}"
     return body
+
+
+# The hidden line: hex of the address, then hex of its signature.
+_RETURN_ADDRESS = re.compile(r"<!-- otto:([0-9a-f]+):([0-9a-f]{64}) -->")
+
+
+def return_address(*, origin: entities.Origin, requester_id: str, key: str) -> str:
+    """
+    Return the hidden line a pull request description carries so that what
+    happens to it can be reported back: the conversation and who asked,
+    signed with ``key``.
+
+    Signed because anyone who can edit a pull request can edit its
+    description: unsigned, they could point Otto at any conversation it is
+    able to post in.
+    """
+    payload = (
+        json.dumps({"origin": entities.origin_to_json(origin), "requester": requester_id})
+        .encode()
+        .hex()
+    )
+    return f"<!-- otto:{payload}:{_sign(payload, key=key)} -->"
+
+
+def read_return_address(body: str, *, key: str) -> tuple[entities.Origin, str] | None:
+    """
+    Return the conversation and requester a pull request description points
+    back to, or None when it carries no return address, or one that ``key``
+    did not sign. Fails closed without a key.
+    """
+    found = _RETURN_ADDRESS.search(body)
+    if found is None or not key:
+        return None
+    payload, signature = found.groups()
+    if not hmac.compare_digest(signature, _sign(payload, key=key)):
+        return None
+    address = json.loads(bytes.fromhex(payload))
+    return entities.origin_from_json(address["origin"]), str(address["requester"])
+
+
+def _sign(payload: str, *, key: str) -> str:
+    # Prefixed, so a signature made for a return address can never be one
+    # for anything else signed with the same key.
+    message = b"otto-return-address:" + payload.encode()
+    return hmac.new(key.encode(), message, hashlib.sha256).hexdigest()
 
 
 _GUIDANCE = """\
@@ -425,6 +503,9 @@ class RepoTools:
 
     profiles: Mapping[str, RepoProfile]
     host: RepoHost
+    # Signs the return address each pull request carries. Empty = none is
+    # written, and nothing that happens to the pull request is reported back.
+    signing_key: str = attrs.field(default="", repr=False)
 
     def as_tools(self) -> list[agents.Tool]:
         """
@@ -541,7 +622,7 @@ class RepoTools:
             base=profile.base,
             branch=f"otto/{_slug(title)}-{uuid.uuid4().hex[:8]}",
             title=title,
-            body=pull_request_body(summary=summary, context=context),
+            body=pull_request_body(summary=summary, context=context, signing_key=self.signing_key),
             files={file.path: file.after for file in staged},
         )
         return f"Pull request opened: {url}"
@@ -561,11 +642,18 @@ async def _answered(tool: str, operation: Awaitable[str]) -> str:
         return _UNREACHABLE
 
 
-def build_change_tools(*, repos: Sequence[RepoProfile], host: RepoHost) -> list[agents.Tool]:
+def build_change_tools(
+    *, repos: Sequence[RepoProfile], host: RepoHost, signing_key: str = ""
+) -> list[agents.Tool]:
     """
     Return the repository tools over ``repos`` for one top-level agent.
+
+    :param signing_key: signs the return address on each pull request; empty
+        = pull requests carry none.
     """
-    return RepoTools(profiles={profile.name: profile for profile in repos}, host=host).as_tools()
+    return RepoTools(
+        profiles={profile.name: profile for profile in repos}, host=host, signing_key=signing_key
+    ).as_tools()
 
 
 @attrs.frozen

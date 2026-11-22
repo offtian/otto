@@ -85,6 +85,12 @@ router → dispatch.accept → dispatch.handle_safely → flows.SUPPORT → deli
   request id for an answer or its apology; `approval:<id>`, `pending:<id>` and
   `expired:<id>` for approval outcomes. Courtesy notes (`delivery.send`) and
   approval cards are the only exceptions.
+- **A request can arrive later.** A due follow-up and a pull request event
+  (`POST /github/webhook`) are turned into a `SupportRequest` on the original
+  conversation and enter through `dispatch.accept` like any other — on behalf
+  of the original requester, with a note saying nobody wrote it.
+- **One run per conversation at a time.** `handle_safely` serializes them; do
+  not start a run on a conversation any other way.
 - **The always-on stores are assists, not gates.** Inbox, outbox, follow-ups
   and memory fail open: log the error and carry on without them.
 - **Anything that makes Otto speak on its own** — reply retries, follow-ups,
