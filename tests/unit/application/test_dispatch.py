@@ -7,7 +7,7 @@ import pytest
 
 from otto import config
 from otto.application import dispatch, support
-from otto.domain.support import entities
+from otto.domain.support import entities, followups
 
 
 NOW = datetime(2026, 11, 22, 9, 0, tzinfo=UTC)
@@ -144,3 +144,63 @@ class TestUnfinishedRequests:
         # replay window was discarded
         assert unfinished == requests
         assert inbox.stale_cutoffs == [NOW - timedelta(hours=24)]
+
+
+class FakeFollowUpStore:
+    def __init__(self, due):
+        self._due = list(due)
+        self.fired = []
+
+    async def due(self, *, now):
+        return list(self._due)
+
+    async def mark_fired(self, follow_up_id):
+        self.fired.append(follow_up_id)
+
+
+class TestFireDueFollowUps:
+    FOLLOW_UP = followups.FollowUp(
+        id=7,
+        origin=entities.SlackThread(channel_id="C1", thread_ts="1.0"),
+        requester_id="U_REQ",
+        note="check Jenkins build 4521",
+    )
+
+    def _wire(self, monkeypatch, *, inbox):
+        store = FakeFollowUpStore(due=[self.FOLLOW_UP])
+        monkeypatch.setattr(
+            config, "get_config", lambda: types.SimpleNamespace(inbox=inbox, follow_ups=store)
+        )
+        handler = mock.AsyncMock()
+        monkeypatch.setattr(support, "handle_support_request", handler)
+        return store, handler
+
+    async def test_wakes_the_conversation_with_the_agents_own_note(self, monkeypatch):
+        # Given a follow-up that has come due
+        store, handler = self._wire(monkeypatch, inbox=FakeInbox())
+
+        # When the always-on tick fires due follow-ups
+        await dispatch.fire_due_follow_ups(now=NOW)
+
+        # Then the conversation gets a request on the requester's behalf that
+        # carries the note, and the follow-up is marked fired
+        request = handler.await_args.kwargs["request"]
+        assert (request.id, request.user_id, request.origin) == (
+            "followup:7",
+            "U_REQ",
+            self.FOLLOW_UP.origin,
+        )
+        assert "check Jenkins build 4521" in request.text
+        assert store.fired == [7]
+
+    async def test_does_not_run_a_follow_up_that_is_already_in_flight(self, monkeypatch):
+        # Given a follow-up whose request a crashed process already accepted
+        in_flight = _request("followup:7")
+        store, handler = self._wire(monkeypatch, inbox=FakeInbox(in_flight=[in_flight]))
+
+        # When the tick sees it still pending
+        await dispatch.fire_due_follow_ups(now=NOW)
+
+        # Then it is marked fired without a second run
+        assert handler.await_count == 0
+        assert store.fired == [7]

@@ -132,6 +132,30 @@ class OutboundMessageRecord(SQLModel, table=True):
     )
 
 
+class FollowUpRecord(SQLModel, table=True):
+    """
+    One follow-up an agent scheduled for itself — a request that arrives
+    later. When ``due_at`` passes, the always-on loop turns the row into an
+    inbound request on the same conversation, carrying the note as the reason
+    the agent woke.
+    """
+
+    __tablename__ = "follow_ups"
+
+    id: int | None = Field(default=None, primary_key=True)
+    origin: str = Field(sa_column=Column(Text, nullable=False, index=True))  # serialized Origin
+    requester_id: str
+    # Written by the agent from the conversation (PII): blanked once the
+    # follow-up fires or is cancelled.
+    note: str = Field(sa_column=Column(Text, nullable=False))
+    due_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    status: str = Field(default="pending", index=True)  # pending | fired | cancelled
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(tz=UTC),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
 class RuntimeFlagRecord(SQLModel, table=True):
     """
     One runtime-tunable flag (C1): today only ``otto_enabled`` — the kill

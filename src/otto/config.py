@@ -26,6 +26,7 @@ from otto.data import db
 from otto.domain.identity import users as identity_users
 from otto.domain.support import agent as support_agent
 from otto.domain.support import approvals as support_approvals
+from otto.domain.support import followups as support_followups
 from otto.domain.support import inbox as support_inbox
 from otto.domain.support import memory as support_memory
 from otto.domain.support import outbox as support_outbox
@@ -82,6 +83,9 @@ class Configuration(pydantic.BaseModel):
     # Durable outbox for replies; None = no database, so a reply is sent
     # once, inline, and a channel failure surfaces to the caller.
     outbox: pydantic.SkipValidation[support_outbox.PostgresOutbox | None] = None
+    # Follow-ups agents schedule for themselves; None = no database, and
+    # the scheduling tools say so instead of failing.
+    follow_ups: pydantic.SkipValidation[support_followups.PostgresFollowUpStore | None] = None
     model: pydantic.SkipValidation[model_interface.Model] = None  # type: ignore[assignment]
     # MCP mounts are optional: None = capability runs on its local stub
     # tool, so the full loop works in dev with zero external dependencies.
@@ -210,7 +214,7 @@ class Configuration(pydantic.BaseModel):
 
     def load_stores(self) -> None:
         """
-        Wire the directory, approval store, request inbox and reply outbox:
+        Wire the directory and the approval, inbox, outbox and follow-up stores:
         DB-backed when a database is configured (2.3/Phase 2); local
         yaml/in-memory keeps the zero-dependency dev loop when DATABASE_URL
         is empty.
@@ -220,6 +224,7 @@ class Configuration(pydantic.BaseModel):
             self.approvals = support_approvals.PostgresApprovalStore(database=db.get_db())
             self.inbox = support_inbox.PostgresInbox(database=db.get_db())
             self.outbox = support_outbox.PostgresOutbox(database=db.get_db())
+            self.follow_ups = support_followups.PostgresFollowUpStore(database=db.get_db())
         else:
             self.directory = identity_users.UserDirectory(
                 users=identity_users.load_users(pathlib.Path(self.settings.users_file))

@@ -125,6 +125,8 @@ consult several at once — and synthesize their findings into one answer,
 citing which specialist found what. When you cannot resolve the issue, or
 the user asks for a human, call escalate_to_human with a crisp subject,
 summary, and urgency (low/normal/high), then tell the user what you did.
+When something needs time to finish, offer to check back and call
+schedule_follow_up — never promise to follow up later as text alone.
 
 """
 
@@ -182,7 +184,11 @@ def build_team_agents(
     }
     owners: dict[str, agents.Agent[support_agent.SupportContext]] = {}
     for team in registry.teams:
-        tools: list[agents.Tool] = [support_agent.escalate_to_human, support_agent.search_memory]
+        tools: list[agents.Tool] = [
+            support_agent.escalate_to_human,
+            support_agent.search_memory,
+            *support_agent.FOLLOW_UP_TOOLS,
+        ]
         tools.extend(
             confluence_tools if confluence_tools is not None else (support_agent.search_knowledge,)
         )
